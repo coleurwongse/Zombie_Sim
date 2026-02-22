@@ -16,7 +16,8 @@
 # 6 - City
 # 7 - Suburban
 # Civilization (0 - anarchy, > 0 - belongs to a civilization)
-# [[0, 0], [8, 10]]
+# Airport (0 - no airport, 1 - airport)
+# Civilization example list - [[0, 0], [8, 10]]
 # Morale (0-10)
 # Number of squares controlled
 
@@ -313,3 +314,4 @@ while not done:
                     human_movement(i, j, i-2, j)
                     human_movement(i, j, i, j+2)
                     human_movement(i, j, i, j-2)
+
