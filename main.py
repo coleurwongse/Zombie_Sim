@@ -33,7 +33,6 @@ mode = 3
 knowledge_current = 0
 knowledge_past = 0
 pixel_size = 6
-airport_infected = False
 text = True
 done = False
 
@@ -45,21 +44,21 @@ pygame.display.set_caption("Zombie Infection Simulator")
 font = pygame.font.Font(None, 36)
 
 # Opening map file
-f = open("map5.txt","r")
+f = open("map7.txt","r")
 for line in f:
-    map.append(line.split(', '))
+    map.append(line.split('; '))
 f.close()
 
 # Setting variables to integers
 for i in range(len(map)):
     for j in range(len(map[i])):
-        map[i][j] = map[i][j].split()
+        map[i][j] = map[i][j].split(';')
         map[i][j][0] = int(map[i][j][0])
         map[i][j][1] = int(map[i][j][1])
         map[i][j][2] = int(map[i][j][2])
         map[i][j][3] = int(map[i][j][3])
         map[i][j][4] = int(map[i][j][4])
-        map[i][j][5] = int(map[i][j][5])
+        map[i][j][5] = eval(map[i][j][5])
 
 # Creating civilizations
 civilizations = [[0, 10], [8, 10]]
@@ -151,10 +150,9 @@ def draw(map):
                     pass
     # Updates display
     pygame.display.update()
-    time.sleep(0.1)
 
 # Human movement
-def human_movement(x, y, x1, y1):
+def human_movement(num_humans, x, y, x1, y1):
     # If target point is off the map
     if y1 >= len(map):
         y1-=len(map)
@@ -164,40 +162,40 @@ def human_movement(x, y, x1, y1):
         if map[x][y][3] != 0:
             # If target point has a higher defense level
             if map[x][y][2] < map[x1][y1][2] + 1:
-                if int(map[x][y][0]/2) + map[x1][y1][0] > 255:
-                    num = 255 - map[x][y][0]
+                if int(num_humans/8) + map[x1][y1][0] > 255:
+                    num = 255 - num_humans
                 else:
-                    num = int(map[x][y][0]/2)
+                    num = int(num_humans/8)
             # If target point is a mountain
             elif map[x1][y1][3] == 3 and map[x][y][3] != 3:
-                if int(map[x][y][0]/2) + map[x1][y1][0] > 255:
-                    num = 255 - map[x][y][0]
+                if int(num_humans/8) + map[x1][y1][0] > 255:
+                    num = 255 - num_humans
                 else:
-                    num = int(map[x][y][0]/2)
+                    num = int(num_humans/8)
             # If target point is ocean
             elif map[x1][y1][3] == 0:
-                if int(map[x][y][0]/2) + map[x1][y1][0] > 255:
-                    num = 255 - map[x][y][0]
+                if int(num_humans/8) + map[x1][y1][0] > 255:
+                    num = 255 - num_humans
                 else:
-                    num = int(map[x][y][0]/2)
+                    num = int(num_humans/8)
             # If target point has fewer zombies
             elif map[x][y][1] > map[x1][y1][1] and map[x][y][2] <= map[x1][y1][2]:
-                if int(map[x][y][0]/2) + map[x1][y1][0] > 255:
-                    num = 255 - map[x][y][0]
+                if int(num_humans/8) + map[x1][y1][0] > 255:
+                    num = 255 - num_humans
                 else:
-                    num = int(map[x][y][0]/2)
+                    num = int(num_humans/8)
         # If target point is a mountain
         elif map[x1][y1][3] == 3 and map[x1][y1][1] < map[x][y][1]:
-            if int(map[x][y][0] / 2) + map[x1][y1][0] > 255:
-                num = 255 - map[x][y][0]
+            if int(num_humans / 8) + map[x1][y1][0] > 255:
+                num = 255 - num_humans
             else:
-                num = int(map[x][y][0] / 2)
+                num = int(num_humans / 8)
         # If target point has fewer zombies
-        elif map[x1][y1][1] <= map[x][y][1]:
-            if map[x][y][0] + map[x1][y1][0] > 255:
-                num = 255 - map[x][y][0]
+        elif map[x1][y1][1] + 5 <= map[x][y][1]:
+            if int(num_humans / 8) + map[x1][y1][0] > 255:
+                num = 255 - num_humans
             else:
-                num = map[x][y][0]
+                num = int(num_humans / 8)
         # Updates human populations
         map[x][y][0] -= num
         map[x1][y1][0] += num
@@ -293,18 +291,18 @@ while not done:
         for j in range(len(map[i])):
             if map[i][j][0] > 0:
                 # If there is an airport
-                if map[i][j][5] == 1:
+                if map[i][j][5]:
                     # If the datapoint is infected
                     if map[i][j][1] > 10 or map[i][j][0] < 5:
                         # If datapoint is completely infected, there is no airport
                         if map[i][j][1] > map[i][j][0]:
-                            map[i][j][5] = 0
+                            map[i][j][5] = []
                         # Otherwise, infection spreads to other airports
                         else:
-                            airport_infected = True
-                    # If no zombies and an airport has been infected, add zombies
-                    elif airport_infected and map[i][j][1] < 1:
-                        map[i][j][1] += 1
+                            for k in map[i][j][5]:
+                                if map[k[0]][k[1]][1] < 1:
+                                    map[k[0]][k[1]][1] += 1
+
                 # If there are zombies and the defense level is extremely high, zombies are exterminated
                 if map[i][j][1] > 0 and map[i][j][2] >= 7:
                     map[i][j][1] = 0
@@ -338,7 +336,7 @@ while not done:
                 # If the datapoint is not ocean or mountain
                 if map[i][j][0] > 0 and map[i][j][3] != 3:
                     # Helps zombies survive in low populations from airports
-                    if 0 < map[i][j][1] < 5 and map[i][j][2] < 5 and map[i][j][5] == 1:
+                    if 0 < map[i][j][1] < 5 and map[i][j][2] < 5 and map[i][j][5]:
                         num = math.ceil(map[i][j][0] * map[i][j][1] / map[i][j][2] / 80) + 7
                         map[i][j][0] -= num
                         map[i][j][1] += num
@@ -366,15 +364,16 @@ while not done:
                 zombie_movement(num_zombies, i, j, i, j-1)
             # Human movement
             if knowledge_current > 5 and map[i][j][1] > 5 and map[i][j][0] > 0:
-                human_movement(i, j, i+1, j)
-                human_movement(i, j, i-1, j)
-                human_movement(i, j, i, j+1)
-                human_movement(i, j, i, j-1)
-                human_movement(i, j, i+1, j+1)
-                human_movement(i, j, i-1, j-1)
-                human_movement(i, j, i-1, j+1)
-                human_movement(i, j, i+1, j-1)
-                human_movement(i, j, i+2, j)
-                human_movement(i, j, i-2, j)
-                human_movement(i, j, i, j+2)
-                human_movement(i, j, i, j-2)
+                num_humans = map[i][j][0]
+                human_movement(num_humans, i, j, i+1, j)
+                human_movement(num_humans, i, j, i-1, j)
+                human_movement(num_humans, i, j, i, j+1)
+                human_movement(num_humans, i, j, i, j-1)
+                human_movement(num_humans, i, j, i+1, j+1)
+                human_movement(num_humans, i, j, i-1, j-1)
+                human_movement(num_humans, i, j, i-1, j+1)
+                human_movement(num_humans, i, j, i+1, j-1)
+                human_movement(num_humans, i, j, i+2, j)
+                human_movement(num_humans, i, j, i-2, j)
+                human_movement(num_humans, i, j, i, j+2)
+                human_movement(num_humans, i, j, i, j+2)
