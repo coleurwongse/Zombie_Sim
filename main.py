@@ -1,26 +1,3 @@
-# Zombie Infection Simulator
-
-# Map structure
-# 2D array
-# Example point: [255, 0, 7, 1, 1]
-# Human population (0-255)
-# Zombie population (0-255)
-# Defense level (0-10)
-# Terrain
-# 0 - Ocean
-# 1 - Grassland
-# 2 - Forest
-# 3 - Mountain
-# 4 - Desert
-# 5 - Ice / Snow
-# 6 - Urban
-# 7 - Suburban
-# Civilization (0 - anarchy, > 0 - belongs to a civilization)
-# Airport (0 - no airport, 1  - airport)
-# Example civilization list - [[0, 0], [8, 10]]
-# Morale (0-10)
-# Number of squares controlled
-
 # Import statements
 import pygame
 import keyboard
@@ -377,3 +354,4 @@ while not done:
                 human_movement(num_humans, i, j, i-2, j)
                 human_movement(num_humans, i, j, i, j+2)
                 human_movement(num_humans, i, j, i, j+2)
+
