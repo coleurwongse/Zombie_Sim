@@ -21,7 +21,7 @@ pygame.display.set_caption("Zombie Infection Simulator")
 font = pygame.font.Font(None, 36)
 
 # Opening map file
-f = open("map7.txt","r")
+f = open("map.txt","r")
 for line in f:
     map.append(line.split('; '))
 f.close()
@@ -354,4 +354,5 @@ while not done:
                 human_movement(num_humans, i, j, i-2, j)
                 human_movement(num_humans, i, j, i, j+2)
                 human_movement(num_humans, i, j, i, j+2)
+
 
