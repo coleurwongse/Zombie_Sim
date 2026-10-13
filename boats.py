@@ -29,7 +29,7 @@ BOATS_PER_TICK = 90        # at most this many boatloads leave per round (the mo
 BOAT_SHARE = 0.2           # a district sends at most this share of its people per round ...
 BOAT_LOAD = 25             # ... and a boatload holds this many (x PORT_LOAD per port size nearby)
 PORT_LOAD = 1.0
-BOAT_RANGE = 60            # tiles
+BOAT_RANGE = 70            # tiles
 SAFE_NEAR = 15             # a safe coast has fewer zombies than this within 8 tiles
 SAFE_ROOM = 200            # ... and fewer people than this
 INFECTED = 0.45            # share of the zombie:people ratio where they boarded that arrives as zombies
@@ -164,7 +164,7 @@ def refugee_boats(world):
             moved += _ocean_ship(world, C, src, body, owner, ratio)
         if n >= 40 and world.pyrng.random() < 0.2:
             from fracture import _place
-            world.note(f"boats carry {n} refugees from {_place(world, (int(r), int(c)))} to "
+            world.note(f"boats carry {world.people(n)} refugees from {_place(world, (int(r), int(c)))} to "
                        f"{_place(world, (int(sr[j]), int(sc[j])))}" + (f" ({bitten} infected)" if bitten else ""))
     return moved
 
@@ -212,7 +212,7 @@ def _ocean_ship(world, C, src, body, owner, ratio):
     world.ships = getattr(world, "ships", 0) + 1
     if bitten or world.pyrng.random() < 0.3:
         from fracture import _place
-        world.note(f"a ship carries {n} refugees from {_place(world, (r, c))} across the ocean to "
+        world.note(f"a ship carries {world.people(n)} refugees from {_place(world, (r, c))} across the ocean to "
                    f"{_place(world, divmod(int(dst), world.cols))}" + (f" - {bitten} turn on arrival" if bitten else ""))
     return n
 

@@ -6,10 +6,11 @@ import pygame
 
 import render
 import war
+import sim
 from sim import World
 
 parser = argparse.ArgumentParser(description="Zombie infection simulator")
-parser.add_argument("map", nargs="?", default="maps/middle_earth")
+parser.add_argument("map", nargs="?", default="maps/world")
 parser.add_argument("--seed", type=int, default=None, help="random seed (default: a new one every run)")
 parser.add_argument("--war", action="store_true", help="nations 1 and 2 start out at war")
 parser.add_argument("--deterministic", action="store_true", help="no randomness: same map -> same run")
@@ -32,15 +33,15 @@ steps_per_frame = 1
 scroll = 0                       # first row of the country list shown
 
 pygame.init()
-_probe = World.from_folder(MAP_FOLDER)
 _info = pygame.display.Info()
-SCREEN_W = max(1000, min(_info.current_w - 40, _probe.cols * 6 + PANEL)) if _info.current_w else 1600
-SCREEN_H = max(760, min(_info.current_h - 80, _probe.rows * 6)) if _info.current_h else 900
+DESKTOP = (_info.current_w or 1600, _info.current_h or 900)
+# a big window to start with (resizable: drag its edges, or F11 / F for full screen)
+WINDOWED = (max(1000, int(DESKTOP[0] * 0.92)), max(700, int(DESKTOP[1] * 0.85)))
+fullscreen = False
+screen = pygame.display.set_mode(WINDOWED, pygame.RESIZABLE)
+SCREEN_W, SCREEN_H = screen.get_size()
 VIEW_W, VIEW_H = SCREEN_W - PANEL, SCREEN_H
-# start zoomed so the whole map fits (fractional pixels are fine: the map is scaled)
-FIT = min(VIEW_W / _probe.cols, VIEW_H / _probe.rows)
-screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
-del _probe
+FIT = 1.0
 pygame.display.set_caption("Zombie Infection Simulator")
 font = pygame.font.Font(None, 24)
 small = pygame.font.Font(None, 19)
@@ -84,8 +85,31 @@ def new_world():
 
 world = new_world()
 rows, cols = world.H.shape
-zoom = FIT                       # screen pixels per tile
 cx, cy = cols / 2.0, rows / 2.0  # map point at the centre of the view
+
+
+def layout(size):
+    """The window was opened or resized: the map view takes all but the panel; whole map fits at the lowest zoom."""
+    global SCREEN_W, SCREEN_H, VIEW_W, VIEW_H, FIT
+    SCREEN_W, SCREEN_H = max(size[0], PANEL + 200), max(size[1], 400)
+    VIEW_W, VIEW_H = SCREEN_W - PANEL, SCREEN_H
+    FIT = min(VIEW_W / cols, VIEW_H / rows)      # (fractional pixels are fine: the map is scaled)
+
+
+def toggle_fullscreen():
+    global screen, fullscreen, zoom
+    fullscreen = not fullscreen
+    if fullscreen:
+        screen = pygame.display.set_mode(DESKTOP, pygame.FULLSCREEN)
+    else:
+        screen = pygame.display.set_mode(WINDOWED, pygame.RESIZABLE)
+    layout(screen.get_size())
+    zoom = max(FIT, zoom)
+    clamp_view()
+
+
+layout(screen.get_size())
+zoom = FIT                       # screen pixels per tile
 
 
 def clamp_view():
@@ -119,14 +143,20 @@ def hud():
     d = world.date
     head = f"{d.month:02d}/{d.day:02d}/{d.year}   (day {world.ticks})   x{steps_per_frame}" + ("  PAUSED" if paused else "")
     screen.blit(font.render(head, True, (255, 255, 255)), (x, y)); y += 22
-    pop_line = (f"humans {int(world.H.sum()):,}   zombies {int(world.Z.sum()):,}   "
+    pop_line = (f"humans {sim.fmt_people(world.shown(world.H))}   zombies {sim.fmt_people(world.shown(world.Z))}   "
                 f"shipping {int(100 * world.trade_index)}%   world alarm {int(100 * world.alarm)}%")
     screen.blit(small.render(pop_line, True, (220, 220, 230)), (x, y)); y += 17
-    sub = (f"riots {world.last_riots}  fleeing {world.last_panic}  evac {world.last_evac}  "
-           f"refugees {world.last_refugees}  boats {world.last_boats}  resettled {getattr(world, 'last_resettled', 0)}"
-           f"  wars {len(world.wars)}  UN missions {len(getattr(world, 'missions', []))}"
-           + (f"  nukes {getattr(world, 'nuclear_strikes', 0)}" if getattr(world, "nuclear_strikes", 0) else ""))
-    screen.blit(small.render(sub, True, (170, 170, 185)), (x, y)); y += 18
+    P = world.people                                   # (people moved today, at the map's real-population scale)
+    riot = getattr(world, "riot", None)
+    rioting = sim.fmt_people(world.shown(world.H, riot)) if riot is not None and riot.any() else "0"
+    sub = (f"rioting {rioting}  fleeing {P(world.last_panic)}  evac {P(world.last_evac)}  "
+           f"refugees {P(world.last_refugees)}  by boat {P(world.last_boats)}")
+    sub2 = (f"resettled {P(getattr(world, 'last_resettled', 0))}  settlers {P(getattr(world, 'last_settlers', 0))}"
+            f"  wars {len(world.wars)}  {'aid' if getattr(world, 'alliance_of', None) else 'UN'} missions "
+            f"{len(getattr(world, 'missions', []))}"
+            + (f"  nukes {getattr(world, 'nuclear_strikes', 0)}" if getattr(world, "nuclear_strikes", 0) else ""))
+    screen.blit(small.render(sub, True, (170, 170, 185)), (x, y)); y += 16
+    screen.blit(small.render(sub2, True, (170, 170, 185)), (x, y)); y += 18
     cols_txt = "country                      pop    mor army  forts  doing"
     screen.blit(small.render(cols_txt, True, (140, 140, 160)), (x + 14, y)); y += 16
     pygame.draw.line(screen, (70, 70, 90), (x, y), (x + PANEL - 20, y)); y += 3
@@ -134,7 +164,7 @@ def hud():
     summary = world.summary()
     live = [r for r in summary if not r["collapsed"]]
     # importance: people first, then army
-    live.sort(key=lambda r: -(r["pop"] + 2000 * r["military"]))
+    live.sort(key=lambda r: -(r["shown"] + 2000 * r["military"] * world.pop_scale))
     fallen = [r for r in summary if r["collapsed"]]
     list_top = y
     list_bottom = SCREEN_H - LOG_LINES * 15 - 30
@@ -150,7 +180,7 @@ def hud():
         acts = "+".join(ACT.get(a, a) for a in r["action"].split("+"))
         txt = small.render(f"{name}", True, (255, 255, 255) if r["morale"] > 3 else (255, 150, 150))
         screen.blit(txt, (x + 14, y))
-        stats = f"{gov:1s} {r['pop']:7d}  {r['morale']:2d}  {r['military']:.2f}  {r['sites']:3d}  {acts}"
+        stats = f"{gov:1s} {sim.fmt_people(r['shown']):>7s}  {r['morale']:2d}  {r['military']:.2f}  {r['sites']:3d}  {acts}"
         screen.blit(small.render(stats, True, (190, 190, 205)), (x + 175, y))
         if flags:
             screen.blit(small.render(flags, True, (255, 170, 60)), (x + PANEL - 30, y))
@@ -163,15 +193,41 @@ def hud():
         screen.blit(small.render(("fallen: " + names)[:80], True, (200, 120, 120)), (x, y))
     y += 15
     pygame.draw.line(screen, (70, 70, 90), (x, y), (x + PANEL - 20, y)); y += 3
-    for tick, text in list(world.events)[-LOG_LINES:]:
+    rows_ = []                                          # newest last; long messages wrap onto further lines
+    for tick, text in reversed(list(world.events)[-LOG_LINES:]):
         d = world.start_date.fromordinal(world.start_date.toordinal() + tick)
-        screen.blit(small.render(f"{d.month:02d}/{d.day:02d}/{d.year % 100:02d} {text}"[:78], True,
-                                 (210, 210, 130)), (x, y))
+        lines = wrap(f"{d.month:02d}/{d.day:02d}/{d.year % 100:02d} {text}", PANEL - 24, small, indent="      ")
+        if len(rows_) + len(lines) > LOG_LINES and rows_:
+            break
+        rows_[:0] = lines
+    for line in rows_[-LOG_LINES:]:
+        screen.blit(small.render(line, True, (210, 210, 130)), (x, y))
         y += 15
 
 
+def wrap(text, width, fnt, indent=""):
+    """`text` broken into lines no wider than `width` pixels (at word boundaries; continuation lines indented)."""
+    lines, cur = [], ""
+    for word in text.split(" "):
+        trial = word if not cur else cur + " " + word
+        if fnt.size(trial)[0] <= width or not cur.strip():
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = indent + word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+_frame = {}
+
+
 def draw():
-    rgb = render.render_rgb(world, mode)
+    key = (id(world), world.ticks, mode)                # (the map only changes when the world does)
+    if _frame.get("key") != key:
+        _frame["key"], _frame["rgb"] = key, render.render_rgb(world, mode)
+    rgb = _frame["rgb"]
     # the part of the map in view
     half_w, half_h = VIEW_W / zoom / 2, VIEW_H / zoom / 2
     r0 = int(np.floor(cy - half_h)); r1 = int(np.ceil(cy + half_h)) + 1
@@ -208,6 +264,12 @@ while not done:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             done = True
+        elif event.type == pygame.VIDEORESIZE and not fullscreen:
+            WINDOWED = (event.w, event.h)
+            screen = pygame.display.set_mode(WINDOWED, pygame.RESIZABLE)
+            layout(WINDOWED)
+            zoom = max(FIT, zoom)
+            clamp_view()
         elif event.type == pygame.MOUSEWHEEL:
             mx, my = pygame.mouse.get_pos()
             if mx >= VIEW_W:
@@ -236,6 +298,10 @@ while not done:
                 mode = 4
             elif event.key == pygame.K_4:
                 mode = 3
+            elif event.key in (pygame.K_F11, pygame.K_f):
+                toggle_fullscreen()
+            elif event.key == pygame.K_ESCAPE and fullscreen:
+                toggle_fullscreen()
             elif event.key == pygame.K_t:
                 show_text = not show_text
             elif event.key == pygame.K_SPACE:

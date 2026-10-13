@@ -329,4 +329,4 @@ def _strikes(world, w):
             tgt.riot_hit += 1
         if w["strikes"] % 10 == 1:
             from fracture import _place
-            world.note(f"{att.name} strikes {_place(world, (r, c))} ({tgt.name}): {int(killed.sum())} dead")
+            world.note(f"{att.name} strikes {_place(world, (r, c))} ({tgt.name}): {world.people(killed.sum())} dead")

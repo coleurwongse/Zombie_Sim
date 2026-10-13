@@ -31,9 +31,18 @@ UNDEFENDED = 5            # defense below this on ungoverned land counts as unde
 
 
 def _max8(a, wrap):
-    """Maximum over each tile and its 8 neighbours (a row pass, then a column pass)."""
-    m = np.maximum(a, np.maximum(shift(a, 0, 1, wrap, 0.0), shift(a, 0, -1, wrap, 0.0)))
-    return np.maximum(m, np.maximum(shift(m, 1, 0, wrap, 0.0), shift(m, -1, 0, wrap, 0.0)))
+    """Maximum over each tile and its 8 neighbours (a row pass, then a column pass; nothing beyond the edge - the
+    values are never negative)."""
+    m = a.copy()
+    np.maximum(m[:, 1:], a[:, :-1], out=m[:, 1:])
+    np.maximum(m[:, :-1], a[:, 1:], out=m[:, :-1])
+    if wrap:
+        np.maximum(m[:, 0], a[:, -1], out=m[:, 0])
+        np.maximum(m[:, -1], a[:, 0], out=m[:, -1])
+    r = m.copy()
+    np.maximum(r[1:], m[:-1], out=r[1:])
+    np.maximum(r[:-1], m[1:], out=r[:-1])
+    return r
 
 
 def scent(world, win, wrap, key=0):
@@ -47,13 +56,16 @@ def scent(world, win, wrap, key=0):
         return hit[1], hit[2]
     H, D, O = world.H[win], world.D[win], world.O[win]
     walk = world.land[win] & (D < 7)
-    fade = (SCENT_FADE * np.sqrt(world.statics.move.reshape(world.H.shape)[win])).astype(np.float32)
+    # fading per step (faster over rough ground), and nothing at all off walkable land
+    fade = (SCENT_FADE * np.sqrt(world.statics.move.reshape(world.H.shape)[win]) * walk).astype(np.float32)
     weight = np.where(O == 0, np.where(D < UNDEFENDED, 1.0, 0.5), GOVERNED_SCENT)
     prey = np.where(walk, np.maximum(H, 0) * weight, 0.0).astype(np.float32)
     s = prey.copy()
     close = prey > 0
     for i in range(HUNT_REACH):
-        s = np.where(walk, np.maximum(prey, fade * _max8(s, wrap)), 0.0).astype(np.float32)
+        s = _max8(s, wrap)
+        s *= fade
+        np.maximum(s, prey, out=s)
         if i + 1 == CLOSE_REACH:
             close = s > 0
     cache[key] = (world.ticks, s, close, win)
@@ -69,28 +81,30 @@ def hunt(world):
 
 
 def _hunt(world, win, wrap, key):
+    from engine import pad1
     Z, D = world.Z[win], world.D[win]                     # views: moves go straight into the map
     sc, close = scent(world, win, wrap, key)
-    if not sc.any():
-        return 0
     land = world.land[win]
-    src = ((Z >= HUNT_MIN_Z) & (sc > 0) & land
-           & (world.rng.random(Z.shape) < np.where(close, CLOSE_CHANCE, HUNT_CHANCE)))
-    if not src.any():
-        return 0
-    share = np.where(close, CLOSE_SHARE, HUNT_SHARE)
-    ok = land & (D < 7)
-    cand = np.full((8,) + Z.shape, -np.inf, dtype=np.float32)
-    for i, (dr, dc) in enumerate(DIRECTIONS):
-        cand[i] = np.where(shift(ok, dr, dc, wrap, False), shift(sc, dr, dc, wrap, 0.0), -np.inf)
-    best = cand.argmax(axis=0)
-    best_val = np.take_along_axis(cand, best[None], 0)[0]
-    go = src & (best_val > sc * HUNT_UPHILL)
-    rr, cc = np.nonzero(go)
+    rr, cc = np.nonzero((Z >= HUNT_MIN_Z) & (sc > 0) & land)
     if rr.size == 0:
         return 0
-    amount = np.minimum(np.maximum(Z[rr, cc] // share[rr, cc], 1), Z[rr, cc])
-    way = best[rr, cc]
+    cl = close[rr, cc]
+    keep = world.rng.random(rr.size, dtype=np.float32) < np.where(cl, CLOSE_CHANCE, HUNT_CHANCE)
+    rr, cc, cl = rr[keep], cc[keep], cl[keep]
+    if rr.size == 0:
+        return 0
+    # the neighbour with the strongest scent that can be walked into (only looked up where zombies are)
+    p = pad1(np.where(land & (D < 7), sc, -np.inf).astype(np.float32), -np.inf, wrap)
+    vals = np.stack([p[rr + 1 + dr, cc + 1 + dc] for dr, dc in DIRECTIONS])
+    best = vals.argmax(axis=0)
+    best_val = vals[best, np.arange(rr.size)]
+    go = best_val > sc[rr, cc] * HUNT_UPHILL
+    rr, cc, cl, best = rr[go], cc[go], cl[go], best[go]
+    if rr.size == 0:
+        return 0
+    share = np.where(cl, CLOSE_SHARE, HUNT_SHARE)
+    amount = np.minimum(np.maximum(Z[rr, cc] // share, 1), Z[rr, cc])
+    way = best
     mv = world.statics.move.reshape(world.H.shape)[win]
     frac = world.rng.random(rr.size) if world.stochastic else np.full(rr.size, 0.5)
     rows, cols = Z.shape

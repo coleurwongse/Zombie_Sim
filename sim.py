@@ -21,6 +21,8 @@ import fracture
 import holdouts
 import aid
 import expeditions
+import resolve
+import settlers
 import front
 import peace
 import people
@@ -29,10 +31,10 @@ import restart
 import union
 import zombies
 import war
-from civilization import Civilization, box_sum, DIRECTIONS, _slices, MIL_START
+from civilization import Civilization, box_sum, round_sum, DIRECTIONS, _slices, MIL_START
 
 UNORG = (1.3, 1.3)     # unowned land: casualties x, zombie movement into populated tiles x (see engine.py)
-MAX_CIVS = 250
+MAX_CIVS = 500
 BIG = 10 ** 6
 LAPSE = 0               # (off: it turns every national collapse into extinction) defenses on ungoverned land decay down to this unless a garrison holds them (0 = off) ...
 LAPSE_EVERY = 10        # ... losing one level this often (a fallen country's walls crumble, they don't vanish)
@@ -46,6 +48,14 @@ ALARM_ZOMBIES = 2500    # the world takes notice once this many zombies are abou
 ALARM_RATE = 0.002      # ... and its alarm (0..1) rises this much a tick while they are, plus ALARM_FALL per fallen
 ALARM_FALL = 0.02       # government; it fades by ALARM_FADE a tick once the zombies are (nearly) gone
 ALARM_FADE = 0.001
+
+
+def fmt_people(v):
+    v = float(v)
+    for div, suffix in ((1e9, "b"), (1e6, "m"), (1e3, "k")):
+        if abs(v) >= div:
+            return f"{v / div:.1f}{suffix}"
+    return str(int(round(v)))
 
 
 class World:
@@ -135,6 +145,20 @@ class World:
         self.front = None
         # how many people lived on each tile before the outbreak: where survivors rebuild to (restart.py)
         self.H0 = self.H.copy()
+        # what one "person" on the map stands for when numbers are shown (meta "real_population": the people the map
+        # stands for at the start - default: the world today); the simulation itself never uses this
+        self.pop_scale = float(meta.get("real_population", 8.2e9)) / max(1.0, float(np.maximum(self.H, 0).sum()))
+        # ... and per tile (meta "real_pops": each country's real population, spread over its people on the map -
+        # a crowded country isn't shown with the head count of an empty one the same size)
+        scale = np.full(len(self.civs) + 1, self.pop_scale)
+        real = meta.get("real_pops")
+        if real:
+            on_map = np.bincount(self.O.ravel(), weights=np.maximum(self.H, 0).ravel(), minlength=len(scale))
+            for k, p in real.items():
+                k = int(k)
+                if 0 < k < len(scale) and on_map[k] > 0 and p > 0:
+                    scale[k] = float(p) / on_map[k]
+        self.scale_map = scale[np.clip(self.O, 0, len(scale) - 1)].astype(np.float32)
         self.wild = self.H0 <= 10                         # land nobody lived on: no garrison needed to hold it
         self._guarded = None
         self.O0 = self.O.copy()
@@ -148,9 +172,12 @@ class World:
             if not (0 < k < len(self.civs)):
                 continue
             rad, lvl = int(st.get("radius", 1)), int(st.get("level", 7))
-            tiles = [(rr, cc) for rr in range(max(r - rad, 0), min(self.rows, r + rad + 1))
-                     for cc in range(max(c - rad, 0), min(self.cols, c + rad + 1))
-                     if self.O[rr, cc] == k and self.H[rr, cc] > 10] or [(r, c)]
+            if "tiles" in st:                                    # (a line of defences: Melian's Girdle ...)
+                tiles = [(r, c)] + [(int(a), int(b)) for a, b in st["tiles"] if (int(a), int(b)) != (r, c)]
+            else:
+                tiles = [(rr, cc) for rr in range(max(r - rad, 0), min(self.rows, r + rad + 1))
+                         for cc in range(max(c - rad, 0), min(self.cols, c + rad + 1))
+                         if self.O[rr, cc] == k and self.H[rr, cc] > 10] or [(r, c)]
             for rc in tiles:
                 self.D[rc] = max(self.D[rc], lvl)
             self.civs[k].sites.append(dict(center=(r, c), tiles=tiles, level=lvl, target=lvl, standing=True))
@@ -181,6 +208,17 @@ class World:
     def date(self):
         """Today's date in the simulation (one tick = one day)."""
         return self.start_date + datetime.timedelta(days=self.ticks)
+
+    def people(self, n):
+        """A head count as shown on screen: scaled to the real population, 950, 12.3k, 4.5m, 1.2b."""
+        return fmt_people(n * self.pop_scale)
+
+    def shown(self, a, mask=None):
+        """Real-world head count of map counts `a` (people or zombies) - each tile at its own country's scale."""
+        s = getattr(self, "scale_map", None)
+        if s is None:
+            return float(np.sum(a if mask is None else a[mask])) * self.pop_scale
+        return float(np.sum((a * s) if mask is None else (a * s)[mask]))
 
     def datestr(self, tick=None):
         d = self.start_date + datetime.timedelta(days=self.ticks if tick is None else tick)
@@ -245,7 +283,7 @@ class World:
         if self._near_tick != self.ticks:
             self._near_cache, self._near_tick = {}, self.ticks
         if radius not in self._near_cache:
-            self._near_cache[radius] = box_sum(self.Z, radius)
+            self._near_cache[radius] = round_sum(self.Z, radius)       # (round: no square-cornered decisions)
         return self._near_cache[radius]
 
     # ---------------------------------------------------------------------- tick
@@ -271,7 +309,7 @@ class World:
             # A country's territory doesn't vanish because few people live there (mountains, deserts, emptied
             # districts stay its land): an empty tile is lost when zombies hold it, or when it's a stray speck
             # with none of its own government's land around it.
-            O[low & ((Z > H) | ~self._same_owner_nearby())] = 0
+            O[low & ((Z > np.maximum(H, 2)) | ~self._same_owner_nearby())] = 0     # (one stray zombie isn't enough)
             if self.ticks % GUARD_EVERY == 0:
                 # land with nobody on it is only held where the government's people are close enough to guard it
                 guarded = self.guarded(refresh=True)
@@ -298,6 +336,8 @@ class World:
             aid.step(self)
             expeditions.step(self)
             peace.step(self)
+            resolve.step(self)
+            settlers.step(self)
             self.last_hunt = zombies.hunt(self)
             # defenses nobody maintains fall apart (standing garrisons are the exception)
             if LAPSE and self.ticks % LAPSE_EVERY == 0:
@@ -344,12 +384,18 @@ class World:
         if self._guarded is None or refresh or self._guarded.shape != self.O.shape:
             O = self.O
             g = (O > 0) & (self.H > 10)
-            for _ in range(GUARD_REACH):
+            for k in range(GUARD_REACH + 1):              # (side and diagonal steps alternate: round, not square)
                 grow = g.copy()
-                for dr, dc in DIRECTIONS:
+                full_step = k % 2 == 1 or k == GUARD_REACH - 1    # (the step past the core reaches all 8 ways:
+                for dr, dc in (DIRECTIONS if full_step else ((-1, 0), (1, 0), (0, -1), (0, 1))):   # what's annexed next to it stays)
                     grow |= engine.shift(g, dr, dc, self.wrap, False) & (engine.shift(O, dr, dc, self.wrap, -1) == O)
                 g = grow & (O > 0)
-            self._guarded = g
+                if k == GUARD_REACH - 2:
+                    self._guard_core = g.copy()           # (land taken next to this is sure to stay guarded)
+                if k == GUARD_REACH - 1:
+                    inner = g.copy()
+            from civilization import jag
+            self._guarded = inner | (g & (jag(self) > 0))     # (the outermost ring only here and there: ragged)
         return self._guarded
 
     def _settle_capitals(self):
@@ -435,11 +481,14 @@ class World:
         n = len(self.civs)
         H = np.maximum(self.H, 0)
         pops = np.bincount(self.O.ravel(), weights=H.ravel(), minlength=n)
+        s = getattr(self, "scale_map", None)
+        shown = (np.bincount(self.O.ravel(), weights=(H * s).ravel(), minlength=n) if s is not None
+                 else pops * self.pop_scale)
         tiles = np.bincount(self.O.ravel(), weights=(H > 0).ravel(), minlength=n)
         for c in self.civs[1:]:
             if c.collapsed and not c.sites:
                 continue
-            rows.append(dict(id=c.id, name=c.name, pop=int(pops[c.id]), tiles=int(tiles[c.id]),
+            rows.append(dict(id=c.id, name=c.name, pop=int(pops[c.id]), shown=float(shown[c.id]), tiles=int(tiles[c.id]),
                              morale=c.morale, food=c.food, materials=c.materials, military=float(c.military),
                              action=c.label, collapsed=c.collapsed, sites=len(c.sites),
                              closed=c.closed, at_war=war.at_war(self, c.id), successor=c.successor,

@@ -78,7 +78,8 @@ def ready(civ, world, danger):
     if world is None:
         return False
     return (civ.military >= OFFENSIVE_ARMY and civ.materials >= OFFENSIVE_MIN_MATERIALS and not civ.famine
-            and civ.m.get("pop", 0) >= OFFENSIVE_POP and danger < 0.35 and not war.at_war(world, civ.id)
+            and civ.m.get("pop", 0) >= OFFENSIVE_POP and danger < 0.35 + 0.45 * getattr(civ, "resolve", 0.0)
+            and not war.at_war(world, civ.id)
             and civ.m.get("hordes", 0) > 0 and (civ.bases or (stalled(civ) and _has_target(civ, world))))
 
 

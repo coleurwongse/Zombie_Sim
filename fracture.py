@@ -37,6 +37,8 @@ REGION_SPACING = 24        # a collapsing country splits around major cities at 
 REGION_MAX = 6             # ... into at most this many regions per connected piece of land
 REGION_CITY = 0.35         # ... and only around cities at least this big compared with its biggest one
 CAPITAL_HELD = 0.3         # the capital counts as lost once less than this share of its city is under control
+SAFE_NEAR = 60             # a region with fewer zombies than this within 8 tiles of all its land is "quiet" ...
+SAFE_REGION_SHARE = 0.25   # ... and can organize as a state with this share of the usual size
 REGION_DANGER = 0.6        # a region with this share of its people facing hordes falls into anarchy instead
 CITY_POP = 150
 ANARCHY_NEAR = 350         # zombies within 4 tiles that make a crowded city ungovernable ...
@@ -54,9 +56,16 @@ OVEREXTEND_EVERY = 30      # overextension: how often a sprawling country is che
 OVEREXTEND_MIN = 150       # populated tiles a country needs before it can be overextended
 OVEREXTEND_GAIN = 1.25     # it has grown past this x its size of ~200 ticks ago ...
 OVEREXTEND_FOREIGN = 0.15  # ... or more than this share of its people live on land that was never its own
-OVEREXTEND_SIZE = 600      # bigger countries are harder to hold together (x size / this)
-OVEREXTEND_CHANCE = 0.08   # per check, at instability 1
-OVEREXTEND_COOLDOWN = 200
+OVEREXTEND_SIZE = 600      # bigger countries are harder to hold together (x size / this, up to OVEREXTEND_SIZE_CAP)
+OVEREXTEND_SIZE_CAP = 4.0
+OVEREXTEND_CHANCE = 0.12   # per check, at instability 1
+OVEREXTEND_COOLDOWN = 120
+OVEREXTEND_GROWN = 1.5     # populated land beyond this x what its country held at the start makes it unstable ...
+OVEREXTEND_GROWN_W = 0.8   # ... this much per unit (up to 2 units)
+OVEREXTEND_SPRAWL = 15.0   # degrees: foreign land (never its country's) farther than this from the capital (90th
+OVEREXTEND_SPRAWL_W = 0.6  #   percentile) makes it unstable, this much per extra OVEREXTEND_SPRAWL (up to 2)
+OVEREXTEND_CONQUEST = 0.4  # land taken from other countries beyond this x its own original land makes it unstable ...
+OVEREXTEND_CONQUEST_W = 1.2  # ... this much per unit (Mexico holding half the United States: likely to split)
 INDEPENDENCE_EVERY = 30    # overseas land that was never the country's own (taken by an expedition, annexed ...)
 INDEPENDENCE_CHANCE = 0.08 # ... declares independence with this chance per check (more when the country is shaky)
 INDEPENDENCE_MIN_POP = 400
@@ -78,17 +87,31 @@ def _network(world, ctl):
     return ctl | sea
 
 
-def _city_score(world, mask):
-    """How good each tile of `mask` is as a seat of government: a big city, safe, defensible."""
-    H = np.maximum(world.H, 0)
+def _city_score(world, mask, sl=(slice(None), slice(None))):
+    """How good each tile of `mask` is as a seat of government: a big city, safe, defensible.  (`mask` may be cut to
+    the window `sl`.)"""
+    H = np.maximum(world.H[sl], 0)
     size = box_sum(H, 2) / (25 * 255.0)
-    safe = 1.0 - np.clip(world.zombie_near(8) / 2000.0, 0, 1)
-    prot = np.clip(protection(world), 0, 10) / 10.0
-    score = 2.0 * size + 1.5 * safe + 0.5 * prot + 0.3 * (world.T == 6)
-    return np.where(mask & (H >= 30), score, -np.inf)
+    safe = 1.0 - np.clip(world.zombie_near(8)[sl] / 2000.0, 0, 1)
+    prot = np.clip(protection(world)[sl], 0, 10) / 10.0
+    score = 2.0 * size + 1.5 * safe + 0.5 * prot + 0.3 * (world.T[sl] == 6)
+    score = np.where(mask & (H >= 30), score, -np.inf)
+    r0, c0 = sl[0].start or 0, sl[1].start or 0                # a famous big city beats a crowded suburb (the
+    cities = []                                               # map's named cities count by their real size)
+    for n, r, c, p in getattr(world, "cities", []):
+        r, c = r - r0, c - c0
+        if 0 <= r < score.shape[0] and 0 <= c < score.shape[1] and np.isfinite(score[r, c]):
+            cities.append((p, r, c))
+    if cities:
+        top = max(p for p, _, _ in cities)
+        for p, r, c in cities:
+            score[r, c] += 1.0 + 1.5 * np.sqrt(p / max(top, 1e-9))
+    return score
 
 
 def pick_capital(world, civ, mask=None):
+    """The seat of government: the best city - big (the map's named cities count by their real size), safe,
+    defensible."""
     mask = (world.O == civ.id) if mask is None else mask
     score = _city_score(world, mask)
     if not np.isfinite(score).any():
@@ -127,30 +150,36 @@ def _capital_ok(world, civ, ctl):
 
 
 def relocate(world, civ, ctl):
-    """The capital is lost: move the government to the best city in its largest connected piece of land."""
-    net = _network(world, ctl)
+    """The capital is lost: move the government to the best city in its largest connected piece of land.  (Worked
+    out in the window around its land: the sea lanes reach SEA_REACH tiles off its coasts at most.)"""
+    sl = world.bbox(civ.id, SEA_REACH + 3)
+    r0, c0 = sl[0].start or 0, sl[1].start or 0
+    ctl_w = ctl[sl]
+    net = ctl_w | (is_water(world.T[sl]) & (world.Z[sl] < SEA_MAX_Z) & (box_sum(ctl_w, SEA_REACH) > 0))
     lab, n = label(net)
     if n == 0:
         return False
-    pops = np.bincount(lab.reshape(-1), weights=np.maximum(world.H, 0).reshape(-1) * ctl.reshape(-1), minlength=n + 1)
+    Hw = np.maximum(world.H[sl], 0)
+    pops = np.bincount(lab.reshape(-1), weights=(Hw * ctl_w).reshape(-1), minlength=n + 1)
     pops[0] = 0
     best = int(np.argmax(pops))
     if pops[best] < REGION_MIN_POP / 2:
         return False
     old = civ.capital
-    cand = ctl & (lab == best)
+    cand = ctl_w & (lab == best)
     if old is not None:
-        cand[max(old[0] - 2, 0):old[0] + 3, max(old[1] - 2, 0):old[1] + 3] = False
-    score = _city_score(world, cand)
+        cand[max(old[0] - 2 - r0, 0):max(old[0] + 3 - r0, 0), max(old[1] - 2 - c0, 0):max(old[1] + 3 - c0, 0)] = False
+    score = _city_score(world, cand, sl)
     rc = None
     for _ in range(8):                                  # the best city that is really under control
         if not np.isfinite(score).any():
             break
         r, c = np.unravel_index(int(np.argmax(score)), score.shape)
+        score[r, c] = -np.inf
+        r, c = r + r0, c + c0
         if _held_share(world, ctl, r, c, civ.id) >= CAPITAL_SAFE:
             rc = (int(r), int(c))
             break
-        score[r, c] = -np.inf
     if rc is None:
         return False
     civ.capital = rc
@@ -174,7 +203,8 @@ def _new_state(world, parent, region, gov=None, why=""):
     civ.gov = gov
     civ.successor, civ.founded, civ.split_from = True, world.ticks, parent.id
     civ.root = parent.root
-    civ.name = govern.state_name(world, gov, region, civ.id, parent)
+    civ.capital = pick_capital(world, civ, region)
+    civ.name = govern.state_name(world, gov, region, civ.id, parent, near=civ.capital)
     world.O[region] = civ.id
     world.last_owner[region] = civ.id
     civ.military = parent.military * (0.8 if gov == "junta" else 0.6)
@@ -187,7 +217,6 @@ def _new_state(world, parent, region, gov=None, why=""):
         parent.food = max(0.0, parent.food - civ.food * 0.8)
     civ.sites = sites_in
     parent.sites = [s for s in parent.sites if not region[s["center"]]]
-    civ.capital = pick_capital(world, civ, region)
     world.note(f"{civ.name} ({govern.LABEL[gov] or gov}) breaks away from {parent.name}" + (f": {why}" if why else ""))
     return civ
 
@@ -238,12 +267,21 @@ def _regions(world, mask):
     return out
 
 
+def _safe(world, region):
+    """No horde anywhere near the region: a quiet province (Alaska when the lower 48 fall)."""
+    return int(world.zombie_near(8)[region].max(initial=0)) < SAFE_NEAR
+
+
 def _viable(world, region):
+    """Can the region organize into a state?  A quiet one (no horde near it) can be much smaller - its people don't
+    give up on government just because the capital far away fell."""
     H = world.H
     pop = int(np.maximum(H[region], 0).sum())
     near = world.zombie_near(4)
     danger = float(np.maximum(H, 0)[region & (near >= 300)].sum()) / max(pop, 1)
-    return pop >= REGION_MIN_POP and int((region & (H > 10)).sum()) >= REGION_MIN_TILES and danger < REGION_DANGER
+    small = SAFE_REGION_SHARE if _safe(world, region) else 1.0
+    return (pop >= REGION_MIN_POP * small and int((region & (H > 10)).sum()) >= max(3, REGION_MIN_TILES * small)
+            and danger < REGION_DANGER)
 
 
 def fracture_all(world, civ, why, keep_core=True):
@@ -271,7 +309,7 @@ def fracture_all(world, civ, why, keep_core=True):
     for region in regions:                                              #  doesn't break into more new states)
         if region is core:
             continue
-        if _viable(world, region) and not fresh:
+        if _viable(world, region) and (not fresh or _safe(world, region)):
             new = _new_state(world, civ, region)
             if new is not None:
                 born.append(new)
@@ -302,9 +340,11 @@ def fracture_all(world, civ, why, keep_core=True):
     return False
 
 
-def _secede(world, civ, ctl, lab, capital_label, age):
-    """Regions out of contact with the capital for too long go their own way."""
-    H = world.H
+def _secede(world, civ, ctl, lab, capital_label, age, sl):
+    """Regions out of contact with the capital for too long go their own way.  (Everything here is cut to the
+    window `sl` around the government's land.)"""
+    H = world.H[sl]
+    r0, c0 = sl[0].start or 0, sl[1].start or 0
     flat = lab.reshape(-1)
     n = int(lab.max())
     if n <= 1:
@@ -317,24 +357,33 @@ def _secede(world, civ, ctl, lab, capital_label, age):
         part = (lab == k) & ctl
         if not part.any():
             continue
-        if any(part[bs["center"]] for bs in civ.bases):
+
+        def inside(rc):
+            r, c = rc[0] - r0, rc[1] - c0
+            return 0 <= r < part.shape[0] and 0 <= c < part.shape[1] and part[r, c]
+        if any(inside(bs["center"]) for bs in civ.bases):
             continue                                    # an offensive base and its zone are supplied by the army
-        forts = any(part[s["center"]] for s in civ.sites)
+        forts = any(inside(s["center"]) for s in civ.sites)
         if forts and ages[k] / sizes[k] < 4 * CUTOFF_TICKS:
             continue                                    # garrisons hold out loyally for a long time
         pop = int(np.maximum(H[part], 0).sum())
         populated = int((part & (H > 10)).sum())
-        if pop >= REGION_MIN_POP and populated >= REGION_MIN_TILES:
-            new = _new_state(world, civ, part, why="cut off from the capital")
+        region = np.zeros(world.H.shape, dtype=bool)
+        region[sl] = part
+        small = SAFE_REGION_SHARE if _safe(world, region) else 1.0     # (a quiet region manages on its own)
+        if pop >= REGION_MIN_POP * small and populated >= max(3, REGION_MIN_TILES * small):
+            new = _new_state(world, civ, region, why="cut off from the capital")
             if new is not None:
                 import war
                 war.maybe_civil_war(world, civ, new)
         elif forts:
             continue                                    # a besieged garrison holds out, loyal to the government
         else:
-            world.O[part] = 0
+            world.O[sl][part] = 0
             if pop >= 100:
-                world.note(f"{civ.name} loses contact with {pop} people near {_place(world, tuple(np.argwhere(part)[0]))}")
+                r, c = np.argwhere(part)[0]
+                world.note(f"{civ.name} loses contact with {world.people(pop)} people near "
+                           f"{_place(world, (int(r) + r0, int(c) + c0))}")
 
 
 def step(world):
@@ -354,6 +403,8 @@ def step(world):
             continue
         if civ.capital is None:
             civ.capital = pick_capital(world, civ)
+            if civ.capital is None:
+                continue                                # (nowhere to govern from yet)
         if civ.successor and world.ticks - civ.founded < CAPITAL_GRACE:
             pass                                        # (a new state gets a few days to set up its seat)
         elif not _capital_ok(world, civ, ctl) and not relocate(world, civ, ctl):
@@ -371,14 +422,13 @@ def step(world):
             age_c[mine_c] = 0
             civ._cut = False
             continue
-        lab = np.zeros(world.H.shape, dtype=np.int32)
-        lab[sl] = lab_c
-        cap = int(lab[civ.capital])
-        cut_c = ctl_c & (lab[sl] != cap)
+        cr, cc = civ.capital[0] - (sl[0].start or 0), civ.capital[1] - (sl[1].start or 0)
+        cap = int(lab_c[cr, cc]) if 0 <= cr < lab_c.shape[0] and 0 <= cc < lab_c.shape[1] else 0
+        cut_c = ctl_c & (lab_c != cap)
         age_c[mine_c & ~cut_c] = 0
         age_c[cut_c] += FRACTURE_EVERY
         civ._cut = bool(cut_c.any())
-        _secede(world, civ, ctl, lab, cap, np.where(ctl, age, 0))
+        _secede(world, civ, ctl_c, lab_c, cap, np.where(ctl_c, age_c, 0), sl)
 
 
 def _join_by_sea(world, sl, lab, n):
@@ -465,10 +515,30 @@ def overextension(world):
         pop = np.maximum(world.H[win], 0)
         f_share = float(pop[foreign].sum()) / max(1.0, float(pop[mine].sum()))
         gain = n / max(1.0, float(min(hist)))
-        instab = 1.5 * max(0.0, gain - OVEREXTEND_GAIN) + 2.5 * max(0.0, f_share - OVEREXTEND_FOREIGN)
+        own0 = getattr(civ, "_own0", None)
+        if own0 is None:                                # (its own original land: counted once)
+            own0 = civ._own0 = max(1, int(((world.O0 == civ.id) | (world.O0 == civ.root)).sum()))
+        conquest = (float((foreign & (o0 > 0)).sum()) / own0          # conquered land vs its own original land
+                    if own0 >= 50 else 0.0)                         # (states founded later have none to compare)
+        own0_pop = getattr(civ, "_own0_pop", None)
+        if own0_pop is None:
+            own0_pop = civ._own0_pop = int((((world.O0 == civ.id) | (world.O0 == civ.root)) & (world.H0 > 10)).sum())
+        grown = n / own0_pop if own0_pop >= 50 else 0.0                # (Paris ruling half of Europe)
+        sprawl = 0.0
+        if foreign.any():                                               # (and ruling it from far away)
+            rr, cc = np.nonzero(foreign)
+            dc = np.abs(cc + win[1].start - civ.capital[1])
+            if world.wrap:
+                dc = np.minimum(dc, world.cols - dc)
+            res = float(world.meta.get("res", 0.5))
+            sprawl = float(np.percentile(np.hypot(rr + win[0].start - civ.capital[0], dc), 90)) * res
+        instab = (1.5 * max(0.0, gain - OVEREXTEND_GAIN) + 2.5 * max(0.0, f_share - OVEREXTEND_FOREIGN)
+                  + OVEREXTEND_CONQUEST_W * min(2.0, max(0.0, conquest - OVEREXTEND_CONQUEST))
+                  + OVEREXTEND_GROWN_W * min(2.0, max(0.0, grown - OVEREXTEND_GROWN))
+                  + OVEREXTEND_SPRAWL_W * min(2.0, max(0.0, sprawl / OVEREXTEND_SPRAWL - 1.0)))
         if instab <= 0:
             continue
-        size = min(2.5, max(0.3, n / OVEREXTEND_SIZE))
+        size = min(OVEREXTEND_SIZE_CAP, max(0.3, n / OVEREXTEND_SIZE))
         mood = max(0.5, 1.0 + (8 - civ.morale) / 8.0)
         if world.pyrng.random() >= OVEREXTEND_CHANCE * instab * size * mood * govern.mod(civ, "morale_loss"):
             continue
@@ -476,7 +546,15 @@ def overextension(world):
         # what breaks away: the land that was never its own, if that is a big part of it; else the far side
         full = np.zeros(world.H.shape, dtype=bool)
         full[win] = (world.O[win] == civ.id)
-        if f_share >= 0.3:
+        conquered = foreign & (o0 > 0)
+        if conquest >= OVEREXTEND_CONQUEST and conquered.any():
+            # the biggest conquered country's old land rises up along its old borders
+            ids, cnt = np.unique(o0[conquered], return_counts=True)
+            old = int(ids[np.argmax(cnt)])
+            part = np.zeros(world.H.shape, dtype=bool)
+            part[win] = full[win] & (o0 == old)
+            why = f"the conquered {world.civs[old].name.split(' (')[0]} won't be ruled from abroad"
+        elif f_share >= 0.3:
             part = np.zeros(world.H.shape, dtype=bool)
             part[win] = full[win] & (o0 != civ.id) & (o0 != civ.root)
             why = "it never belonged to them, and the government can't hold it"

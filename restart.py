@@ -38,17 +38,19 @@ EMPTY_MAX_NEAR = 6         # (a few stray zombies around don't stop it)
 EXPAND_EMPTY_MAX = 25      # empty, (nearly) zombie-free land next to a nation it can take over per step (its territory
                            # grows back over land the zombies have left)
 RESETTLE_EVERY = 4
-RESETTLE_SHARE = 0.02      # of a government's people that can be moved per step ...
+RESETTLE_SHARE = 0.04      # of a government's people that can be moved per step ...
 RESETTLE_GROUP = 15        # ... in groups of this many per tile
-RESETTLE_MAX_TILES = 100   # at most this many tiles settled per government per step
-RESETTLE_KEEP = 30         # a tile never gives up people below this ...
-RESETTLE_GIVE = 0.06       # ... and gives this share of what it has above that (more where it's crowded):
+RESETTLE_MAX_TILES = 160   # at most this many tiles settled per government per step
+RESETTLE_KEEP = 20         # a tile never gives up people below this ...
+RESETTLE_GIVE = 0.1       # ... and gives this share of what it has above that (more where it's crowded):
 RESETTLE_CROWD = 0.25      #     this share of what it holds above its pre-outbreak level
 RESETTLE_MIN_MORALE = 4
+RESETTLE_EMPTY_FIRST = 300   # emptied tiles are settled before half-empty ones are filled up
 RESETTLE_DANGER = 0.7      # a government in more danger than this has other things to do
 HOME_MIN = 30              # (maps that don't know the pre-outbreak population: tiles fill up to this)
-PIONEER_REACH = 4          # settlers also strike out this many tiles (over land) beyond the border into clean, empty land
-SETTLE_HOME = 20           # only land that held at least this many people before is worth resettling
+PIONEER_REACH = 6          # settlers also strike out this many tiles (over land) beyond the border into clean, empty land
+SETTLE_HOME = 11           # only land that held at least this many people before is worth resettling
+STRAY_OK = 2               # zombies within 2 tiles that still let people have children and resettle
 FOUND_EVERY = 8
 FOUND_MIN_TILE_POP = 12
 FOUND_MIN_POP = 400
@@ -97,7 +99,7 @@ def home(world):
 def grow(world, healthy, scale=1.0):
     H, T, O = world.H, world.T, world.O
     cap = home(world)
-    allow = healthy[O] & (H > 10) & (H < cap) & (world.zombie_near(2) == 0)
+    allow = healthy[O] & (H > 10) & (H < cap) & (world.zombie_near(2) <= STRAY_OK)
     import nukes
     poisoned = nukes.poisoned(world)
     if poisoned is not None:
@@ -109,7 +111,7 @@ def grow(world, healthy, scale=1.0):
 def colonize(world, healthy):
     H, Z, T, O = world.H, world.Z, world.T, world.O
     rows, cols = H.shape
-    safe = world.zombie_near(2) == 0
+    safe = world.zombie_near(2) <= STRAY_OK
     order = list(range(8))
     world.pyrng.shuffle(order)
     moved = 0
@@ -135,7 +137,7 @@ def _working(world):
     ok = np.zeros(len(world.civs), dtype=bool)
     for c in world.civs:
         if c.id and c.ai and not c.collapsed and c.morale >= RESETTLE_MIN_MORALE and c.m and c.m.get("n"):
-            ok[c.id] = c.danger(c.m)[0] < RESETTLE_DANGER
+            ok[c.id] = c.threat(c.m) < RESETTLE_DANGER        # (not its past losses: that's why it rebuilds)
     return ok
 
 
@@ -147,7 +149,7 @@ def resettle(world):
     if not ok.any():
         return 0
     hm = home(world)
-    safe = world.zombie_near(2) == 0
+    safe = world.zombie_near(2) <= STRAY_OK          # (a straggler or two around doesn't stop the work)
     import nukes
     poisoned = nukes.poisoned(world)
     if poisoned is not None:
@@ -163,9 +165,9 @@ def resettle(world):
         np.copyto(view, claim[sr, sc], where=(view == 0) & (claim[sr, sc] > 0))
     # pioneers: clean, unclaimed land a few tiles further out can be settled too (it's guarded once people live there)
     land = world.statics.land
-    for _ in range(PIONEER_REACH - 1):
+    for k in range(PIONEER_REACH - 1):
         grow = edge.copy()
-        for dr, dc in DIRECTIONS:
+        for dr, dc in (DIRECTIONS if k % 2 else ((-1, 0), (1, 0), (0, -1), (0, 1))):     # (round, not square)
             sr, tr = _slices(H.shape[0], dr)
             sc, tc = _slices(H.shape[1], dc)
             view = grow[tr, tc]
@@ -185,7 +187,8 @@ def resettle(world):
     # which tiles each government settles this step: the best land first (with some randomness), up to its budget
     idx = np.flatnonzero(target.ravel())
     owner = who.ravel()[idx]
-    value = hm.ravel()[idx].astype(np.float64) + (world.rng.random(idx.size) * 40 if world.stochastic else 0)
+    value = (hm.ravel()[idx].astype(np.float64) + (world.rng.random(idx.size) * 40 if world.stochastic else 0)
+             + RESETTLE_EMPTY_FIRST * (H.ravel()[idx] <= 10))         # (emptied land first: the country spreads out)
     order = np.lexsort((-value, owner))
     idx, owner = idx[order], owner[order]
     start = np.searchsorted(owner, owner, side="left")
@@ -220,11 +223,14 @@ def expand(world):
     for c in world.civs:
         can[c.id] = bool(c.id and c.ai and not c.collapsed and c.morale >= EXPAND_MIN_MORALE)
     free = (O == 0) & (H > EXPAND_MIN_POP) & (Z * economy.INFESTED < H) & is_land(T) & (U < 0.5) & (R < 1.0)
-    empty = ((O == 0) & (H <= EXPAND_MIN_POP) & (H >= 0) & (Z <= 1) & is_land(T) & (T != 5)
+    empty = ((O == 0) & (H <= EXPAND_MIN_POP) & (H >= 0) & (Z == 0) & is_land(T) & (T != 5)
              & (world.zombie_near(2) <= EMPTY_MAX_NEAR))
     if not (free.any() or empty.any()):
         return
-    guarded = np.where(world.guarded(), O, 0)       # empty land is only taken next to land its people can guard
+    world.guarded()
+    core = getattr(world, "_guard_core", None)
+    guarded = np.where(core if core is not None else world.guarded(), O, 0)   # empty land is only taken where its
+                                                                              # people can keep guarding it
     best = np.zeros_like(O)
     best_g = np.zeros_like(O)
     order = list(range(8))
@@ -324,7 +330,7 @@ def found(world):
         civ.name = govern.state_name(world, civ.gov, mask, civ.id) if world.cities else f"Colony {civ.id}"
         civ.capital = None
         world.note(f"survivors found {civ.name}" + (f" ({govern.LABEL[civ.gov]})" if world.cities else "")
-                   + f": {pop} people on {int(mask.sum())} tiles")
+                   + f": {world.people(pop)} people on {int(mask.sum())} tiles")
         _adopt_garrisons(world)
 
 

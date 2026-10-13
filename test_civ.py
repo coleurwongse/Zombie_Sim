@@ -288,7 +288,9 @@ def main():
         for _ in range(30):
             civ.morale = 9; w.tick()
         return int(w.Z.sum()), civ
-    z_idle, _ = campaign(False); z_war, civ = campaign(True)
+    every = people.STRAY_EVERY; people.STRAY_EVERY = 10 ** 9      # (stragglers off: this is about the army - on a
+    z_idle, _ = campaign(False); z_war, civ = campaign(True)        #  map this small where they land swings it)
+    people.STRAY_EVERY = every
     assert z_war < z_idle * 0.85 and civ.kills > 0, (z_idle, z_war)
     print("22 reclaim: zombies %d without a campaign vs %d with one (%d killed, army 0.80 -> %.2f after training back up)" %
           (z_idle, z_war, civ.kills, civ.military))
@@ -789,8 +791,8 @@ def main():
     # 58. Stragglers: people slip away from threatened places to far, quiet ones - some of them bitten.
     H, Z, D, T, O, A = blank(80, humans=100); Z[30:50, 0:6] = 80
     w = sim.World(H, Z, D, T, O, A, seed=4, stochastic=True, meta={"wrap": False})
-    moved = sum(people.stragglers(w) for _ in range(20))
-    far = int(w.Z[:, 25:].sum())
+    moved = sum(people.stragglers(w) for _ in range(30))
+    far = int(w.Z[:, 14:].sum())
     assert moved > 0 and far > 0, (moved, far)
     print("58 stragglers: %d people struck out on their own; %d of them turned far from the outbreak" % (moved, far))
 
@@ -863,6 +865,178 @@ def main():
     assert "EXPEDITION" in ev and "declares independence" in ev, ev[-300:]
     print("62 expedition: %s; %d tiles held across the strait; then it declared independence"
           % ([e for _, e in w.events if "EXPEDITION" in e][0], held))
+
+    # 63. The Beleriand map: Angband's outbreak, the alliances as they were (Feanor's sons and Doriath are no allies),
+    #     Melian's Girdle round Doriath, the Siege's wars, the calendar of the First Age.
+    w = sim.World.from_folder("maps/beleriand", stochastic=False)
+    ids = {c.name: c.id for c in w.civs}
+    meta = json.load(open("maps/beleriand/meta.json", encoding="utf-8"))
+    r, c = meta["patient_zero"]
+    assert w.civs[int(w.O[r, c])].name == "Angband" and w.Z.sum() > 0 and not w.airports
+    hith, narg, dor, himr = (ids["Hithlum (Fingolfin)"], ids["Nargothrond (Finrod)"], ids["Doriath (Thingol)"],
+                             ids["Himring (Maedhros)"])
+    assert war.allied(w, hith, narg) and war.allied(w, himr, ids["Thargelion (Caranthir)"])
+    assert not war.allied(w, dor, himr) and war.key(dor, himr) in w.rivals
+    assert not war.allied(w, ids["Gondolin"], hith) and war.key(ids["Angband"], hith) in w.wars
+    girdle = max(w.civs[dor].sites, key=lambda s: len(s["tiles"]))
+    assert len(girdle["tiles"]) > 60 and girdle["level"] == 6 and girdle.get("standing")
+    assert w.datestr() == "12/21/455"
+    sizes = {nm: int((w.O == k).sum()) for nm, k in ids.items() if k}
+    assert min(sizes.values()) > 20 and sizes["Angband"] > 1000
+    print("63 Beleriand: %d realms, outbreak in %s on %s; Girdle of %d tiles; Doriath and Himring are rivals"
+          % (len(w.civs) - 1, meta["outbreak"], w.datestr(), len(girdle["tiles"])))
+
+    # 64. Middle-earth's towns and fiefs are realms of their own, allied with their overlords; realms aren't boxes.
+    w = sim.World.from_folder("maps/middle_earth", stochastic=False)
+    ids = {c.name: c.id for c in w.civs}
+    for fief, lord in (("Dol Amroth", "Gondor"), ("Westfold", "Rohan"), ("Esgaroth", "Dale"), ("Buckland", "The Shire"),
+                       ("Harondor", "Harad")):
+        assert (w.O == ids[fief]).sum() > 10 and war.allied(w, ids[fief], ids[lord]), fief
+    fill = {}
+    for name in ("Lothlorien", "Moria", "Rivendell", "Gondor"):
+        rr, cc = np.nonzero(w.O == ids[name])
+        box = (rr.max() - rr.min() + 1) * (cc.max() - cc.min() + 1)
+        fill[name] = rr.size / box
+        assert fill[name] < 0.8, (name, rr.size, box)
+    print("64 Middle-earth: %d realms; Dol Amroth, the Westfold, Lake-town ... allied with their lords; Lothlorien fills"
+          " %d%% of its bounding box, Moria %d%%" % (len(w.civs) - 1, 100 * fill["Lothlorien"], 100 * fill["Moria"]))
+
+    # 65. Numbers on screen stand for the real population: k, m, b with one decimal.
+    assert [sim.fmt_people(v) for v in (950, 12345, 4.5e6, 1.234e9)] == ["950", "12.3k", "4.5m", "1.2b"]
+    w = sim.World.from_folder("maps/world_lite", stochastic=False)
+    shown = {r["name"]: r["shown"] for r in w.summary()}
+    assert 7.0e9 < w.shown(w.H) < 8.5e9 and shown["India"] > 1e9 and 1e8 < shown["Russia"] < 2e8
+    print("65 display: the world's %d map people shown as %s; India %s, Russia %s" % (
+        int(w.H.sum()), sim.fmt_people(w.shown(w.H)), sim.fmt_people(shown["India"]), sim.fmt_people(shown["Russia"])))
+
+    # 66. Refugees who go far head for cities: arrivals 30+ tiles away are at (or right next to) a city.
+    H, Z, D, T, O, A = blank(150, humans=60); Z[70:80, 0:6] = 120
+    w = sim.World(H, Z, D, T, O, A, seed=5, stochastic=True, meta={"wrap": False})
+    w.cities = [("Far City", 75, 45, 2.0), ("Other", 40, 50, 0.5)]
+    h0 = w.H.copy()
+    for _ in range(60):
+        people.stragglers(w)
+    gained = np.argwhere((w.H + w.Z > h0) & (np.arange(150)[None, :] >= 30))
+    near_city = [abs(r - cr) <= 1 and abs(c - cc) <= 1 for r, c in gained for _, cr, cc, _ in w.cities]
+    assert len(gained) > 0 and sum(near_city) == len(gained), gained[:10]
+    print("66 long-distance stragglers: %d places 30+ tiles from the outbreak took some in - all at cities"
+          % len(gained))
+
+    # 67. The turning point: a government that keeps fighting adapts; zombies far from people waste away.
+    import resolve
+    H, Z, D, T, O, A = blank(30, humans=100)
+    w = DW(H, Z, D, T, O, A); w.tick()
+    civ = w.civs[1]
+    civ.m = dict(zone_z=500, pop=1000, growth=-0.05); civ.peak_pop = 1000; civ.morale = 5
+    for _ in range(30):                                   # (nobody adapts in the first weeks of the outbreak)
+        resolve.step(w)
+    assert getattr(civ, "resolve", 0.0) == 0.0
+    w.ticks = resolve.ADAPT_START
+    for _ in range(70):
+        resolve.step(w)
+    assert civ.resolve > 0.6 and civ.turned and civ.morale == 5 + resolve.TURN_MORALE and any("TURNING POINT" in e for _, e in w.events)
+    r_top = civ.resolve
+    civ.m = dict(zone_z=0, pop=1000, growth=0.0)
+    for _ in range(50):
+        resolve.step(w)
+    assert civ.resolve < r_top - 0.1
+    H2, Z2, D2, T2, O2, A2 = blank(40, humans=0, owner=0); Z2[:] = 50
+    w2 = DW(H2, Z2, D2, T2, O2, A2); w2.ticks = resolve.ADAPT_START
+    z0 = int(w2.Z.sum()); run(w2, 50)
+    assert int(w2.Z.sum()) < 0.9 * z0, (z0, int(w2.Z.sum()))
+    print("67 turning point reached after ~60 days of fighting (resolve fades to %.2f in peace); starving horde %d -> %d in 50 days"
+          % (civ.resolve, z0, int(w2.Z.sum())))
+    # 68. A country holding a big conquest (twice its own land, of a fallen neighbour) may lose it: the conquered
+    #     country rises up along its old borders.
+    import fracture
+    H, Z, D, T, O, A = blank(60, humans=100)
+    O[:, 20:] = 2
+    w = DW(H, Z, D, T, O, A); w.tick()
+    a, b = w.civs[1], w.civs[2]
+    b.collapsed = True; w.O[:, 20:] = 1; w.ticks = 30
+    a.m = a.observe(w); a.long_hist.extend([1200] * 10)
+    keep = fracture.OVEREXTEND_CHANCE; fracture.OVEREXTEND_CHANCE = 10.0
+    try:
+        fracture.overextension(w)
+    finally:
+        fracture.OVEREXTEND_CHANCE = keep
+    new = w.civs[-1]
+    assert len(w.civs) == 4 and (w.O[:, :20] == 1).all() and (w.O[:, 20:] == new.id).sum() > 1000
+    print("68 conquest: %s" % [e for _, e in w.events if "breaks away" in e][0])
+
+    # 69. Reaches are round and ragged, not boxes: what's within 6 steps of one tile.
+    H, Z, D, T, O, A = blank(40, humans=100)
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True)
+    one = np.zeros((40, 40), dtype=bool); one[20, 20] = True
+    m = C.within(w, one, 6)
+    corners = m[14, 14] + m[14, 26] + m[26, 14] + m[26, 26]
+    assert m[20, 14] or m[20, 15], "reach too short"
+    assert corners <= 1 and m.sum() < 0.85 * 13 * 13, (int(corners), int(m.sum()))
+    print("69 a reach of 6: %d tiles (a box would be 169), %d of 4 corners" % (int(m.sum()), int(corners)))
+    # 70. Settlers: a country doing well sends a group to once-settled, empty, clean land far away; they found a state.
+    import settlers
+    H, Z, D, T, O, A = blank(80, humans=0, owner=0)
+    H[:, :20] = 150; O[:, :20] = 1
+    w = DW(H, Z, D, T, O, A); w.H0[:, 50:] = 120; w.tick()
+    a = w.civs[1]; a.materials = 200.0; a.morale = 9; a.capital = (40, 5)
+    a.m = a.observe(w)
+    w.ticks = settlers.SETTLE_EVERY * 5
+    keep = settlers.SETTLE_CHANCE; settlers.SETTLE_CHANCE = 10.0
+    try:
+        settlers.step(w)
+    finally:
+        settlers.SETTLE_CHANCE = keep
+    new = w.civs[-1]
+    assert new.id != 1 and new.split_from == 1 and new.root == new.id and (w.O == new.id).sum() >= 1
+    r, c = new.capital
+    assert c >= 50 and w.H[r, c] > 10, (r, c)
+    print("70 settlers: %s" % [e for _, e in w.events if "settlers" in e][0])
+
+    # 71. A quiet province of a falling country becomes a state of its own (not anarchy), named after its biggest city;
+    #     two new states never share a city's name.
+    H, Z, D, T, O, A = blank(60, humans=60)
+    Z[:, :8] = 200
+    w = DW(H, Z, D, T, O, A); w.tick()
+    w.cities = [("Small Town", 50, 50, 0.1), ("Big City", 45, 40, 5.0), ("Bigtown North", 10, 40, 2.0)]
+    civ = w.civs[1]
+    region = np.zeros((60, 60), dtype=bool); region[40:60, 30:60] = True
+    s1 = fracture._new_state(w, civ, region)
+    region2 = np.zeros((60, 60), dtype=bool); region2[5:20, 30:60] = True
+    s2 = fracture._new_state(w, civ, region2)
+    assert "Big City" in s1.name and s1.capital == (45, 40) and "Bigtown North" in s2.name, (s1.name, s2.name)
+    small = np.zeros((60, 60), dtype=bool); small[25:30, 50:56] = True
+    assert fracture._viable(w, small) and not fracture._viable(w, small & False)
+    print("71 new states: %s (capital at its biggest city), %s; a quiet 30-tile province can organize" % (s1.name, s2.name))
+
+    # 72. A region with no town of its own is named after the land it belonged to, never after a city another living
+    #     government holds; settlers' colonies keep their distance from each other.
+    H, Z, D, T, O, A = blank(60, humans=60)
+    O[:, 30:] = 2
+    w = DW(H, Z, D, T, O, A); w.tick()
+    w.civs[1].name, w.civs[2].name = "Rhun", "Mordor"
+    w.cities = [("Barad-dur", 30, 35, 5.0)]
+    east = np.zeros((60, 60), dtype=bool); east[20:40, 22:30] = True
+    s3 = fracture._new_state(w, w.civs[1], east)
+    assert "Barad-dur" not in s3.name and "East Rhun" in s3.name, s3.name
+    H, Z, D, T, O, A = blank(120, humans=0, owner=0)
+    H[:, :20] = 150; O[:, :20] = 1
+    w = DW(H, Z, D, T, O, A); w.H0[:, 40:] = 120; w.tick()
+    a = w.civs[1]; a.materials = 5000.0; a.morale = 9; a.capital = (60, 5)
+    a.m = a.observe(w)
+    keep = settlers.SETTLE_CHANCE, settlers.SETTLE_LAND_REACH; settlers.SETTLE_CHANCE = 10.0
+    settlers.SETTLE_LAND_REACH = 1000.0
+    try:
+        for k in range(5, 10):
+            w.ticks = settlers.SETTLE_EVERY * k
+            a.m = a.observe(w); a.morale = 9; a.materials = 5000.0
+            settlers.step(w)
+    finally:
+        settlers.SETTLE_CHANCE, settlers.SETTLE_LAND_REACH = keep
+    caps = [c.capital for c in w.civs[2:] if c.capital is not None]
+    gaps = [np.hypot(p[0] - q[0], p[1] - q[1]) for i, p in enumerate(caps) for q in caps[i + 1:]]
+    assert len(caps) >= 2 and min(gaps) >= settlers.SETTLE_SPACING, (caps, gaps)
+    print("72 %s (no town of its own; Barad-dur is Mordor's); %d settler colonies at least %.0f tiles apart"
+          % (s3.name, len(caps), min(gaps)))
     print("all civ tests passed")
 
 

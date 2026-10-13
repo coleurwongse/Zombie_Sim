@@ -157,9 +157,10 @@ def fbm(rng, rows, cols, cells=(8, 16, 32, 64), weights=(1.0, 0.6, 0.35, 0.2)):
 
 # ------------------------------------------------------------------------------------------------------- terrain
 def tree_line(lon, lat):
-    """Latitude north of which it's tundra (by longitude: Eurasia, North America)."""
-    eurasia = np.select([lon < 45, lon < 70, lon < 110, lon < 140], [69.0, 67.0, 69.5, 70.5], 69.0)
-    namer = np.select([lon < -140, lon < -100, lon < -75], [67.5, 66.0, 59.0], 58.0)
+    """Latitude north of which it's tundra (by longitude: Eurasia, North America) - a smooth curve, not steps."""
+    eurasia = np.interp(lon, [-30, 20, 45, 70, 90, 110, 140, 180], [69.0, 69.5, 68.0, 67.0, 69.0, 70.0, 70.5, 69.0])
+    namer = np.interp(lon, [-180, -160, -140, -120, -100, -88, -75, -60, -30],
+                      [67.0, 67.5, 67.5, 66.5, 63.0, 59.0, 58.5, 58.0, 58.0])
     return np.where((lon < -30) | (lon > 180), namer, eurasia)
 
 
@@ -186,12 +187,31 @@ def warp(G, mask, amp_deg, seed):
     """A hand-drawn area made natural: its outline is pushed in and out by smooth noise (up to amp_deg degrees)."""
     rng = np.random.default_rng(seed)
     amp = amp_deg / G.res
-    dy = (fbm(rng, G.rows, G.cols, cells=(24, 48, 96, 192)) - 0.5) * 2 * amp
-    dx = (fbm(rng, G.rows, G.cols, cells=(24, 48, 96, 192)) - 0.5) * 2 * amp
+
+    def push():                                   # (spread over the full -amp..amp, not bunched near 0)
+        f = fbm(rng, G.rows, G.cols, cells=(24, 48, 96, 192))
+        return np.clip((f - f.mean()) / (2.0 * f.std() + 1e-12), -1.0, 1.0) * amp
+    dy, dx = push(), push()
     rr = np.clip(np.rint(np.arange(G.rows)[:, None] + dy), 0, G.rows - 1).astype(int)
     cc = np.rint(np.arange(G.cols)[None, :] + dx).astype(int)
     cc = cc % G.cols if G.wrap else np.clip(cc, 0, G.cols - 1)
     return mask[rr, cc]
+
+
+def _uniform(field):
+    """A noise field remapped so its values are spread evenly over 0..1 (by rank)."""
+    out = np.empty(field.size)
+    out[np.argsort(field, axis=None)] = np.linspace(0.0, 1.0, field.size)
+    return out.reshape(field.shape)
+
+
+def soft(G, mask, deg, seed):
+    """An area with a natural edge: pushed about by noise, then blended over about `deg` degrees with a patchy
+    fringe (bits of it scattered just outside, gaps just inside) - no hard or straight edges."""
+    rng = np.random.default_rng(seed)
+    b = blur(warp(G, mask, deg, seed).astype(np.float64), 0.5 * deg / G.res, G.wrap)
+    n = _uniform(fbm(rng, G.rows, G.cols, cells=(32, 64, 128, 256, 512), weights=(0.6, 0.8, 1.0, 1.0, 0.6)))
+    return b > 0.1 + 0.8 * n
 
 
 def _line(G, pts, width):
@@ -209,15 +229,22 @@ def build_terrain(G, land, rng):
     feats = load("ne_50m_geography_regions_polys")
     noise = fbm(rng, G.rows, G.cols, cells=(16, 32, 64, 128))
     wob = (fbm(rng, G.rows, G.cols, cells=(8, 16, 32), weights=(1.0, 0.6, 0.4)) - 0.5) * 7.0
-    f = forest_share(G.LON + wob, G.LAT + wob)
+    wob2 = (fbm(rng, G.rows, G.cols, cells=(8, 16, 32), weights=(1.0, 0.6, 0.4)) - 0.5) * 7.0
+    f = forest_share(G.LON + wob2, G.LAT + wob)
     for ft in feats:
         p = ft["properties"]
         if p["FEATURECLA"] in ("Basin", "Foothills") and p["NAME"] in ("CONGO BASIN", "AMAZON BASIN", "SELVAS"):
-            f = np.where(G.fill([ft["geometry"]]), 0.85, f)
-    T[land & (noise < f)] = FOREST
+            f = np.where(warp(G, G.fill([ft["geometry"]]), 1.5, 600), 0.85, f)
+    f = blur(f, 2.5 / G.res, G.wrap)                    # (woods thin out gradually: no straight forest edges)
+    woods = _uniform(fbm(rng, G.rows, G.cols, cells=(24, 48, 96, 192, 384), weights=(0.5, 0.8, 1.0, 0.8, 0.5)))
+    T[land & (woods < f)] = FOREST                      # (f is the share of the ground that's wooded, in patches)
     deserts = [ft["geometry"] for ft in feats if ft["properties"]["FEATURECLA"] == "Desert"
                and ft["properties"]["NAME"] not in W.NOT_DESERT]
-    desert = G.fill(deserts) if deserts else np.zeros(land.shape, bool)
+    desert = np.zeros(land.shape, bool)
+    for i, geom in enumerate(deserts):                    # (the bigger the desert, the wider its fringe)
+        area = G.fill([geom])
+        if area.any():
+            desert |= soft(G, area, float(np.clip(np.sqrt(area.sum()) * G.res / 5.0, 1.5, 4.0)), 610 + i)
     for i, pts in enumerate(W.EXTRA_DESERTS.values()):
         desert |= warp(G, G.poly(pts), 1.2, 300 + i)
     T[land & desert] = DESERT
@@ -227,16 +254,19 @@ def build_terrain(G, land, rng):
     nile = G.poly([(30.8, 31.5), (32.4, 31.4), (31.6, 30.0), (31.4, 27.5), (32.9, 25.2), (33.1, 23.8), (32.6, 23.8),
                    (32.4, 25.0), (31.0, 27.4), (31.0, 30.0)], 0.3)
     T[land & nile] = GRASS
+    patchy = _uniform(fbm(rng, G.rows, G.cols, cells=(16, 32, 64, 128)))
     for ft in feats:
         p = ft["properties"]
         if p["FEATURECLA"] == "Plateau" and p["NAME"] not in ("Polar Plateau",):
-            m = land & G.fill([ft["geometry"]]) & (noise < 0.62)
+            area = G.fill([ft["geometry"]])
+            deg = float(np.clip(np.sqrt(area.sum()) * G.res / 4.0, 1.5, 6.0))    # (big plateaus: wider fringes)
+            m = land & soft(G, area, deg, 620) & (patchy < 0.72)
             T[m & (T != DESERT)] = HIGHLANDS
     for ft in feats:
         p = ft["properties"]
         if p["FEATURECLA"] != "Range/mtn":
             continue
-        m = land & G.fill([ft["geometry"]], 0.35)
+        m = land & warp(G, G.fill([ft["geometry"]], 0.35), 0.5, 630)
         if not m.any():
             continue
         if p["NAME"] in W.LOW_RANGES:
@@ -259,7 +289,7 @@ def build_terrain(G, land, rng):
     T[land & tibet & (noise < 0.55) & (T != DESERT)] = MOUNTAIN
     T[land & tibet & (T == GRASS)] = HIGHLANDS
     # rainforest: forest in the humid tropics
-    humid = (np.abs(G.LAT + 0.3 * wob) < 10) & ~((G.LON > 33) & (G.LON < 52))
+    humid = (np.abs(G.LAT + 0.3 * wob) < 10) & ~((G.LON + wob2 > 33) & (G.LON - wob2 < 52))
     for ft in feats:
         if ft["properties"]["NAME"] in ("CONGO BASIN", "AMAZON BASIN", "SELVAS"):
             humid |= G.fill([ft["geometry"]])
@@ -270,20 +300,23 @@ def build_terrain(G, land, rng):
             humid |= (x > lo0) & (x < lo1) & (y > la0) & (y < la1)
         else:
             humid |= warp(G, G.poly(area), 0.8, 400 + len(area))
-    humid = warp(G, humid, 2.0, 450)                      # (no straight edges)
+    humid = soft(G, humid, 2.5, 450)                      # (no straight edges)
     T[land & humid & (T == FOREST)] = RAINFOREST
-    tl = tree_line(G.LON, G.LAT) + wob * 0.6
-    T[land & (G.LAT >= tl) & (T != MOUNTAIN)] = TUNDRA
+    # the tree line: a wavering band a few degrees wide where forest and tundra are patchily mixed
+    tl = tree_line(G.LON, G.LAT) + 5.0 * (_uniform(fbm(rng, G.rows, G.cols, cells=(6, 12, 24, 48))) - 0.5)
+    mix = np.clip((G.LAT - tl + 3.0) / 6.0, 0.0, 1.0)
+    speckle = _uniform(fbm(rng, G.rows, G.cols, cells=(64, 128, 256, 512), weights=(0.5, 1.0, 1.0, 0.7)))
+    T[land & (speckle < mix) & (T != MOUNTAIN)] = TUNDRA
     # wetlands: marshes, swamps and bogs (a share of each area, patchy)
     wet_noise = fbm(rng, G.rows, G.cols, cells=(24, 48, 96, 192))
-    soft = land & ~np.isin(T, (MOUNTAIN, DESERT, ICE))
+    soft_ = land & ~np.isin(T, (MOUNTAIN, DESERT, ICE, TUNDRA))
     for ft in feats:
         share = W.WETLAND_REGIONS.get(ft["properties"]["NAME"])
         if share:
-            T[soft & G.fill([ft["geometry"]], 0.3) & (wet_noise < share)] = WETLAND
+            T[soft_ & soft(G, G.fill([ft["geometry"]], 0.3), 2.0, 640) & (wet_noise < share)] = WETLAND
     for i, (pts, share) in enumerate(W.WETLANDS.values()):
-        T[soft & warp(G, G.poly(pts, 0.3), 0.7, 500 + i) & (wet_noise < share)] = WETLAND
-    T[land & (G.LAT < -52) & (T != MOUNTAIN)] = TUNDRA
+        T[soft_ & soft(G, G.poly(pts, 0.3), 1.0, 500 + i) & (wet_noise < share)] = WETLAND
+    T[land & soft(G, G.LAT < -52, 1.5, 660) & (T != MOUNTAIN)] = TUNDRA
     glac = load("ne_50m_glaciated_areas")
     ice = G.fill([g["geometry"] for g in glac], 0.5) & land & (np.abs(G.LAT) > 55)
     T[ice] = ICE
@@ -595,6 +628,7 @@ def build(region="world", res=0.5, seed=11, outbreak=PATIENT_ZERO, min_city=0.1)
     # rebel-held and occupied regions, wars
     by_name = {nm: k for k, nm in enumerate(names, start=1)}
     governments, wars, parents = {}, [], {}
+    real = list(pops)                                    # real populations (Natural Earth), followed through splits
     for sp in W.SPLITS:
         if sp["of"] not in by_name:
             continue
@@ -602,16 +636,20 @@ def build(region="world", res=0.5, seed=11, outbreak=PATIENT_ZERO, min_city=0.1)
         m = (O == a) & G.poly(sp["poly"], 0.3)
         if not m.any():
             continue
+        moved = real[a - 1] * float(H[m].sum()) / max(float(H[O == a].sum()), 1.0)
+        real[a - 1] -= moved
         if "to" in sp:
             if sp["to"] not in by_name:
                 continue
             b = by_name[sp["to"]]
+            real[b - 1] += moved
         else:
             names.append(sp["new"])
             b = len(names)
             governments[str(b)] = sp["gov"]
             parents[str(b)] = a
             pops.append(float(H[m].sum()))
+            real.append(moved)
             rows, cols = np.nonzero(m)
             j = int(np.argmax(H[rows, cols]))
             capitals[str(b)] = [int(rows[j]), int(cols[j])]
@@ -645,6 +683,7 @@ def build(region="world", res=0.5, seed=11, outbreak=PATIENT_ZERO, min_city=0.1)
                 cities=[dict(name=ct["name"], row=ct["row"], col=ct["col"], pop=ct["pop"]) for ct in cities
                         if ct["pop"] >= 0.15],
                 ports=ports, military=military, nukes=nukes, wars=wars, rivals=rivals, governments=governments, parents=parents, traits=traits,
+                real_pops={str(k): round(p) for k, p in enumerate(real, start=1)},
                 patient_zero=pz, source="Natural Earth (public domain) + world_data.py")
     print(f"{len(cities)} cities, {n_ap} airports ({len(airports)} airport tiles), {len(ports)} ports, "
           f"{len(wars)} wars, {int(H.sum())} people")

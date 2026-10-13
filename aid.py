@@ -14,7 +14,7 @@ On the world map this is "the UN": world.un counts the missions and the food sen
 """
 import numpy as np
 
-from civilization import box_sum, window
+from civilization import box_sum, window, within
 
 AID_EVERY = 10
 DONOR_DANGER = 0.2
@@ -144,7 +144,7 @@ def _sweep(world, d, r):
     Zw = world.Z[win]
     if not owned.any() or not Zw.any():
         return 0
-    weight = np.where(owned, 3.0, np.where(box_sum(owned, SWEEP_REACH) > 0, 1.0, 0.0))
+    weight = np.where(owned, 3.0, np.where(within(world, owned, SWEEP_REACH, win), 1.0, 0.0))
     rr, cc = np.nonzero((weight > 0) & (Zw >= 3))
     if rr.size == 0:
         return 0

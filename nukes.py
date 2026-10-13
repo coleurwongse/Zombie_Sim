@@ -176,7 +176,7 @@ def detonate(world, civ, rc, what, why=""):
     world.nuclear_strikes = getattr(world, "nuclear_strikes", 0) + 1
     from fracture import _place
     world.note(f"NUCLEAR STRIKE{' ' + why.upper() if why else ''}: {civ.name} hits {what} at {_place(world, rc)} - "
-               f"{dead_z} zombies and {dead_h} people killed")
+               f"{world.people(dead_z)} zombies and {world.people(dead_h)} people killed")
     # the countries whose people died answer for it
     for k in np.flatnonzero(hit):
         if k == civ.id or k == 0:

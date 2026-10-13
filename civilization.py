@@ -30,7 +30,9 @@ ACTIONS = (IGNORE, FORTIFY, PURGE, EVACUATE, QUARANTINE, RECLAIM, OFFENSIVE, RET
 ACTIVITIES = (QUARANTINE, RETREAT, FORTIFY, PURGE, EVACUATE, RECLAIM, OFFENSIVE)
 
 # --- morale ---------------------------------------------------------------------------
-ANARCHY_AT = 3             # morale below this: the civilization collapses
+ANARCHY_AT = 3             # morale below this: the civilization collapses ...
+MORALE_HELD = 0.6          # ... but not while it still holds this share of its peak population: a government that
+                           #     has most of its people doesn't dissolve over a bad month (it can still lose its capital)
 NEAR_RADIUS = 4            # "close" = within this many tiles (square box)
 MORALE_NEAR = 250          # zombies in that box for a tile to count as being on the front
 SIGNIFICANT_DEFENSE = 4    # defense (or terrain protection) at/above this really holds zombies back
@@ -137,21 +139,78 @@ REMNANT_PATROL = 0.10      # share of zombies next to a garrison killed per tick
 DIRECTIONS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
 
-def box_sum(arr, r):
-    """Sum of arr over the (2r+1)x(2r+1) box around each tile (zero outside the map).  Running sums down the rows,
-    then along them (integer counts in int32 - 255 x a million tiles fits - which is much faster)."""
+def box_sum(arr, r, rx=None):
+    """Sum of arr over the (2r+1)x(2r+1) box around each tile (or (2r+1) rows x (2rx+1) columns), zero outside the
+    map.  Running sums down the rows, then along them (integer counts in int32 - 255 x a million tiles fits - which
+    is much faster)."""
     arr = np.asarray(arr)
     dt = np.int32 if arr.dtype == bool or (arr.dtype.kind in "iu" and arr.size * 256 < 2 ** 31) else np.int64
     rows, cols = arr.shape
-    k = 2 * r + 1
+    rx = r if rx is None else rx
+    k, kx = 2 * r + 1, 2 * rx + 1
     c = np.zeros((rows + k, cols), dtype=dt)
     np.cumsum(arr, axis=0, dtype=dt, out=c[r + 1:r + 1 + rows])
     c[r + 1 + rows:] = c[r + rows]
     v = c[k:] - c[:-k]
-    c2 = np.zeros((rows, cols + k), dtype=dt)
-    np.cumsum(v, axis=1, out=c2[:, r + 1:r + 1 + cols])
-    c2[:, r + 1 + cols:] = c2[:, r + cols:r + cols + 1]
-    return c2[:, k:] - c2[:, :-k]
+    c2 = np.zeros((rows, cols + kx), dtype=dt)
+    np.cumsum(v, axis=1, out=c2[:, rx + 1:rx + 1 + cols])
+    c2[:, rx + 1 + cols:] = c2[:, rx + cols:rx + cols + 1]
+    return c2[:, kx:] - c2[:, :-kx]
+
+
+def round_sum(arr, r):
+    """Like box_sum, but over a roundish patch (an octagon: two crossed rectangles) - so whatever is decided on these
+    counts (who flees, what's given up, where the horde is 'near') has round edges, not square ones.  Scaled up to
+    the box's area, so thresholds set for box counts still mean the same."""
+    if r <= 1:
+        return box_sum(arr, r)
+    k = max(1, int(round(0.6 * r)))
+    s = box_sum(arr, r, k) + box_sum(arr, k, r) - box_sum(arr, k)
+    box, cross = (2 * r + 1) ** 2, 2 * (2 * r + 1) * (2 * k + 1) - (2 * k + 1) ** 2
+    return (s * (box / cross)).astype(s.dtype)
+
+
+SIDES = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+
+def steps(mask, n, through=None):
+    """Steps from every tile to the nearest tile of `mask`, up to n (n + 1 beyond) - counted 'round': side steps and
+    diagonal steps alternate, so the distance grows in octagons (close to circles), not in squares.  `through`, if
+    given, is the ground the steps may cross."""
+    rows, cols = mask.shape
+    dist = np.where(mask, 0, n + 1).astype(np.int16)
+    cur = mask.copy()
+    for k in range(1, n + 1):
+        grow = cur.copy()
+        for dr, dc in (SIDES if k % 2 else DIRECTIONS):
+            sr, tr = _slices(rows, dr)
+            sc, tc = _slices(cols, dc)
+            grow[tr, tc] |= cur[sr, sc]
+        if through is not None:
+            grow &= through | cur
+        new = grow & ~cur
+        if not new.any():
+            break
+        dist[new] = k
+        cur = grow
+    return dist
+
+
+def jag(world, win=(slice(None), slice(None))):
+    """A fixed field of -1.5..1.5 per tile: added to a reach, it makes the edge of what's in reach ragged."""
+    f = getattr(world, "_jag", None)
+    if f is None or f.shape != world.H.shape:
+        from make_world import fbm
+        seed = int(getattr(world, "seed", 0) or 0) if getattr(world, "stochastic", False) else 0
+        g = fbm(np.random.default_rng(seed + 77), world.rows, world.cols,
+                cells=(max(4, world.cols // 12), max(8, world.cols // 6), max(16, world.cols // 3)))
+        f = world._jag = (np.clip((g - g.mean()) / (2.0 * g.std() + 1e-9), -1.0, 1.0) * 1.5).astype(np.float32)
+    return f[win]
+
+
+def within(world, mask, reach, win=(slice(None), slice(None)), through=None):
+    """Tiles within about `reach` steps of `mask` (cut to window `win`): a ragged, roundish band - no boxes."""
+    return steps(mask, reach + 2, through) <= reach + jag(world, win)
 
 
 def protection(world):
@@ -248,7 +307,7 @@ def flow_away(world, src, ok, share, cost, improvement, min_move=0, win=None):
     nbr = world.statics.nbr
     Hf, Of = H.ravel(), O.ravel()
     okf = ok.ravel()
-    costf = cost.ravel().astype(np.float32)
+    costf = cost.ravel()
     closed = getattr(world, "closed", None)
     shut = None
     if closed:                                    # quarantined nations don't let outsiders in
@@ -264,11 +323,11 @@ def flow_away(world, src, ok, share, cost, improvement, min_move=0, win=None):
         good = valid & okf[tc]
         if shut is not None:
             good &= ~(shut[Of[tc]] & (Of[tc] != Of[idx]))
-        cand[k] = np.where(good, costf[tc], np.inf)
+        cand[k] = np.where(good, costf[tc].astype(np.float32), np.inf)
         tgts[k] = tc
     best = cand.argmin(axis=0)
     cols = np.arange(idx.size)
-    go = cand[best, cols] < costf[idx] * improvement
+    go = cand[best, cols] < costf[idx].astype(np.float32) * improvement
     if not go.any():
         return 0
     s_i = idx[go]
@@ -447,6 +506,7 @@ class Civilization:
             expanding = (len(hist) == TREND_WINDOW and hist[-1] >= hist[0] * TREND_GROWTH + 2
                          and rises >= TREND_WINDOW // 2)
             m["significant"] = significant
+            m["growing_front"] = significant and expanding
             if significant and expanding:
                 self._pressure += 1
                 hold = True                  # no recovery while the front is still advancing
@@ -472,8 +532,11 @@ class Civilization:
                 loss = 0
             elif loss >= 2 and n >= 2 * STABLE_TILES:
                 loss -= 1
+        res = getattr(self, "resolve", 0.0)
+        if hold and not self.famine and getattr(self, "turned", False) and not m.get("growing_front"):
+            hold = False                     # past the turning point a line that holds is enough to recover
         if loss:
-            self._loss_acc += loss * govern.mod(self, "morale_loss")       # juntas and clans take shocks better
+            self._loss_acc += loss * govern.mod(self, "morale_loss") * (1.0 - 0.75 * res)   # (adapted: shrugs it off)
             loss = int(self._loss_acc)
             self._loss_acc -= loss
             self.morale = max(self.morale - loss, 0)
@@ -481,10 +544,12 @@ class Civilization:
         elif not hold:
             self._calm += 1
             if self._calm % RECOVER_EVERY == 0 and self.morale < 10:
-                self._recover_acc += govern.mod(self, "recover")
+                self._recover_acc += govern.mod(self, "recover") * (1.0 + res)
                 if self._recover_acc >= 1.0:
                     self._recover_acc -= 1.0
                     self.morale += 1
+        if self.morale < ANARCHY_AT and m.get("pop", 0) >= MORALE_HELD * max(getattr(self, "peak_pop", 0.0), 1.0):
+            self.morale = ANARCHY_AT
         if self.morale < ANARCHY_AT:
             self.collapse(world)
 
@@ -520,6 +585,15 @@ class Civilization:
             d = min(1.0, d + 0.3 * (10 - self.morale) / 10.0)   # falling morale makes everything feel urgent
         return d, s_over, s_dmg
 
+    def threat(self, m):
+        """0..1: the danger it is in right now - zombies at its people, overrun people, an outbreak growing - without
+        what it has already lost (a country that lost a fifth of its people is not still in danger for that; it is
+        rebuilding).  For rebuilding, settling and expeditions."""
+        s_exp = min(1.0, m["pop_exposure"] * 3)
+        s_over = min(1.0, m["pop_overrun"] * 6)
+        s_grow = min(1.0, max(0.0, m["growth"]) * 2)
+        return max(s_exp, s_over, 0.8 * s_grow)
+
     def score(self, m):
         d, s_over, s_dmg = self.danger(m)
         off = {FORTIFY: -1.0, PURGE: -1.0, EVACUATE: -1.0, QUARANTINE: -1.0, RECLAIM: -1.0, OFFENSIVE: -1.0}
@@ -531,7 +605,7 @@ class Civilization:
         # A strong, safe nation with an army takes the offensive.
         if (m["zone_z"] >= RECLAIM_MIN_ZOMBIES and m.get("hordes", m["strikes"]) > 0 and not self.famine
                 and self.materials >= RECLAIM_MIN_MATERIALS and self.military >= RECLAIM_READY):
-            off[RECLAIM] = 0.25 + 0.8 * self.military - 0.7 * d
+            off[RECLAIM] = 0.25 + 0.8 * self.military - 0.7 * d + 0.5 * getattr(self, "resolve", 0.0)
         off[RETREAT] = -1.0
         # Closing the borders pays off while the horde is still outside and the people inside are clean.
         # (Judged before the 'calm' shortcut: a quiet week at a shut border is no reason to open it.)
@@ -552,7 +626,7 @@ class Civilization:
             EVACUATE: 1.2 * s_over + 0.4 * s_dmg - 0.15,
         })
         if d >= RETREAT_DANGER and m.get("exposure", 0.0) >= 0.08:      # pull back to land that can be held
-            off[RETREAT] = 0.9 * d + 0.6 * m.get("exposure", 0.0) - 0.35
+            off[RETREAT] = 0.9 * d + 0.6 * m.get("exposure", 0.0) - 0.35 - 0.6 * getattr(self, "resolve", 0.0)
         return off
 
     @property
@@ -653,7 +727,8 @@ class Civilization:
             return                                              # peacetime: no more drafting (peace.py demobilizes)
         d = self.danger(m)[0]
         rate = (MIL_RATE * min(1.0, m["pop"] / 1500.0) * (1.0 if d < 0.6 else 0.5) * world.jitter(0.3)
-                * govern.mod(self, "army") * (0.5 + self.strength))      # strong armies mobilize faster
+                * govern.mod(self, "army") * (0.5 + self.strength)       # strong armies mobilize faster
+                * (1.0 + getattr(self, "resolve", 0.0)))                  # (and a country at war with them, faster)
         rate = min(rate, 1.0 - self.military)
         self.military += rate
         self.materials -= MIL_COST * rate
@@ -669,19 +744,22 @@ class Civilization:
             return
         # zombies among its own people first, then the nearest ones outside, then further out
         weight = np.zeros(Zw.shape, dtype=np.float32)
+        dist = steps(owned, max(RECLAIM_REACHES) + 2)
+        jg = jag(world, win)
         for k, reach in enumerate(sorted(RECLAIM_REACHES, reverse=True)):
-            weight = np.where(box_sum(owned, reach) > 0, k + 1.0, weight)
+            weight = np.where(dist <= reach + jg, k + 1.0, weight)                 # (round, ragged bands)
         weight = np.where(owned, len(RECLAIM_REACHES) + 2.0, weight)
         rr, cc = np.nonzero((weight > 0) & (Zw >= RECLAIM_MIN_Z))
         if rr.size == 0:
             return
         vals = Zw[rr, cc]
-        width = max(4, int((RECLAIM_TILES + 70 * self.military) * self.size(world)))
+        res = getattr(self, "resolve", 0.0)
+        width = max(4, int((RECLAIM_TILES + 70 * self.military) * self.size(world) * (1.0 + 0.9 * res)))
         if vals.size > width:
             keep = np.argpartition(-(vals * weight[rr, cc]), width)[:width]
             rr, cc, vals = rr[keep], cc[keep], vals[keep]
         quality = 0.6 + 0.8 * self.strength
-        share = min(0.9, RECLAIM_KILL * (0.4 + self.military) * quality * world.jitter(0.25))
+        share = min(0.9, RECLAIM_KILL * (0.4 + self.military) * quality * world.jitter(0.25) * (1.0 + 0.9 * res))
         kills = np.minimum(np.maximum(1, np.ceil(vals * share)).astype(np.int32), vals)
         cost = float(kills.sum()) * RECLAIM_COST
         if cost > self.materials:
@@ -729,7 +807,7 @@ class Civilization:
         stake = np.clip(box_sum(np.maximum(H, 0), 3) / (49 * 150.0), 0, 1)       # people within 3 tiles
         city = stake * (H >= FORT_MIN_POP)
         threat = 0.3 + 0.7 * np.clip(near20 / 3000.0, 0, 1) + 0.5 * np.clip(near8 / 1500.0, 0, 1)
-        value = (3.0 * city + 2.5 * choke + 0.3 + 0.4 * (T == 3)) * threat
+        value = (3.0 * city + 2.5 * choke + 0.3 + 0.4 * (T == 3) + 0.8 * (T == 6)) * threat   # (cities first)
         out[win] = np.where(elig, value, 0.0)
         return out
 
@@ -824,7 +902,8 @@ class Civilization:
         most = max(4, int(PURGE_MAX_TILES * self.size(world)))
         if idx.size > most:
             idx = idx[np.argpartition(-Z[idx], most)[:most]]
-        kills = (Z[idx] * PURGE_KILL * (0.2 + 0.8 * self.alert)).astype(np.int32)      # (needs mobilizing too)
+        kills = (Z[idx] * min(0.9, PURGE_KILL * (0.2 + 0.8 * self.alert) * (1.0 + 0.9 * getattr(self, "resolve", 0.0)))
+                 ).astype(np.int32)                                                      # (needs mobilizing too)
         cost = float(kills.sum()) * PURGE_COST
         scale = min(1.0, self.materials / cost) if cost > 0 else 1.0
         kills = (kills * scale).astype(np.int32)

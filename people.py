@@ -14,8 +14,9 @@ Runs once per tick (only when the world is created with ai=True), before civiliz
   Refugees      people pouring into a district raise its unrest (crowding, rumours, shortages).
   Stragglers    small groups from threatened districts strike out on their own - by car, on foot, smuggled across
                 borders whatever the government says (shut borders only stop some of them) - to some quiet,
-                uninfected place far away on the same landmass.  Some of them were bitten: that's how the infection
-                turns up in the middle of big untouched regions.
+                uninfected place on the same landmass - most a short way, some to a city or port further off (bigger
+                cities likelier).  Some of them were bitten: that's how the infection turns up in a city far from the
+                outbreak.
 """
 import numpy as np
 
@@ -31,15 +32,20 @@ PANIC_CHANCE = 0.6         # at most this share of scared tiles flee on a given 
 PANIC_IMPROVEMENT = 0.7    # only toward a neighbour at least this much safer
 
 STRAY_EVERY = 2            # stragglers: every this many ticks ...
-STRAY_SOURCES = 8          # ... up to this many threatened districts send a group off
+STRAY_SOURCES = 6          # ... up to this many threatened districts send a group off - a few more when much is
+STRAY_PER_SOURCE = 300     # threatened: one more for every this many threatened districts ...
+STRAY_MAX_SOURCES = 14     # ... up to this many
 STRAY_FEAR = 60            # zombies within 4 tiles that make people leave on their own
 STRAY_MIN_POP = 30
 STRAY_GROUP = 10           # people per group (at most)
-STRAY_RANGE = (6, 30)      # tiles travelled
-STRAY_TRIES = 6            # random destinations tried per group
+STRAY_RANGE = (4, 16)      # most groups go a short way (tiles) to somewhere quiet ...
+STRAY_FAR = 0.25           # ... this share head for a city or port further off ...
+STRAY_FAR_RANGE = (16, 60) # ... this far (tiles) - the bigger the city, the likelier
+STRAY_TRIES = 6            # destinations tried per group
 STRAY_BITTEN = 0.4         # share of the zombie:people ratio where they left that turns on arrival ...
 STRAY_BASE = 0.01          # ... plus this (bites hidden from the others)
 STRAY_BORDER = 0.5         # chance a group gets past a shut border
+STRAY_SCREEN = 0.8         # a mobilized, adapted country catches up to this share of the bitten at its checkpoints
 
 UNREST_DECAY = 0.9
 UNREST_GAIN = 0.5
@@ -75,24 +81,28 @@ NO_GOVERNMENT_MORALE = 3   # how much restraint a tile with no civilization has
 
 def _distance(world, land, safe, steps):
     """Steps (8-way, over `land`) from every tile to the nearest `safe` tile, up to `steps` (10**6 beyond).
-    A 3x3 minimum done as a row pass then a column pass - same result as checking all 8 neighbours, half the work."""
-    INF = 10 ** 6
-    dist = np.where(safe, 0, INF).astype(np.int32)
-    blocked = ~land
-    for _ in range(steps):
-        m = dist.copy()
+    A 3x3 minimum done as a row pass then a column pass - same result as checking all 8 neighbours, half the work
+    (in 16-bit integers, in place)."""
+    INF = 30000
+    dist = np.where(safe, 0, INF).astype(np.int16)
+    wall = np.where(land, 0, INF).astype(np.int16)
+    m, best = np.empty_like(dist), np.empty_like(dist)
+    for i in range(steps):
+        m[:] = dist
         np.minimum(m[:, 1:], dist[:, :-1], out=m[:, 1:])
         np.minimum(m[:, :-1], dist[:, 1:], out=m[:, :-1])
-        best = m.copy()
+        best[:] = m
         np.minimum(best[1:], m[:-1], out=best[1:])
         np.minimum(best[:-1], m[1:], out=best[:-1])
-        best = np.minimum(best + 1, dist)
-        best[best > INF] = INF
-        best[blocked] = INF
-        if (best == dist).all():
+        best += 1
+        np.minimum(best, dist, out=best)
+        np.maximum(best, wall, out=best)
+        if i % 3 == 2 and np.array_equal(best, dist):
             break
-        dist = best
-    return dist
+        dist, best = best, dist
+    out = dist.astype(np.int32)
+    out[out >= INF] = 10 ** 6
+    return out
 
 
 def windows(world):
@@ -160,10 +170,12 @@ def mass_evacuation(world):
     dist = evac_distance(world)
     # people who trust the walls stay: held fortification sites and ground the army or terrain really protects
     src = (alarm & (H >= EVAC_MIN_POP) & (protection(world) < EVAC_TRUST) & ~world.fort_mask()
-           & (is_land(world.T)) & (dist > 0) & (dist < 10 ** 6))
-    src &= world.rng.random(H.shape) < EVAC_CHANCE
-    if not src.any():
+           & world.land & (dist > 0) & (dist < 10 ** 6))
+    rr, cc = np.nonzero(src)
+    if rr.size == 0:
         return 0
+    stay = world.rng.random(rr.size) >= EVAC_CHANCE
+    src[rr[stay], cc[stay]] = False
     ok = world.land & (dist < 10 ** 6)
     return _flow(world, src, ok, EVAC_SHARE, dist, 1.0, min_move=2)
 
@@ -180,19 +192,40 @@ def refugees(world):
     return _flow(world, src, ok, REFUGEE_SHARE, dist, 1.0, min_move=1)
 
 
+def _places(world):
+    """Cities and ports as (rows, cols, weight) arrays: where people travelling far are headed."""
+    cache = getattr(world, "_stray_places", None)
+    if cache is None:
+        pts = {}
+        for name, r, c, pop in world.cities:
+            pts[(r, c)] = max(pts.get((r, c), 0.0), max(pop, 0.01))
+        for r, c, size in getattr(world, "ports", []):
+            pts[(r, c)] = pts.get((r, c), 0.0) + 0.05 * size
+        if pts:
+            rc = np.array(list(pts), dtype=np.int64)
+            cache = (rc[:, 0], rc[:, 1], np.sqrt(np.array(list(pts.values()))))
+        else:
+            cache = (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0))
+        world._stray_places = cache
+    return cache
+
+
 def stragglers(world):
-    """Small groups leave threatened districts for quiet, uninfected places far away (see the module notes)."""
+    """Small groups leave threatened districts for quiet, uninfected places (see the module notes): most a short way,
+    some to a city or port further off."""
     H, Z, O = world.H, world.Z, world.O
     near4 = world.zombie_near(4)
     src = np.flatnonzero(((H >= STRAY_MIN_POP) & (near4 >= STRAY_FEAR) & world.land).ravel())
     if src.size == 0:
         return 0
     rng = world.rng
-    if src.size > STRAY_SOURCES:
-        src = rng.choice(src, STRAY_SOURCES, replace=False)
+    k_src = min(STRAY_MAX_SOURCES, max(STRAY_SOURCES, src.size // STRAY_PER_SOURCE))
+    if src.size > k_src:
+        src = rng.choice(src, k_src, replace=False)
     near8 = world.zombie_near(8)
     mass = world.statics.landmass
     closed = getattr(world, "closed", set()) or set()
+    pr, pc, pw = _places(world)
     Hf, Zf = H.ravel(), Z.ravel()
     moved = 0
     for k in src:
@@ -200,10 +233,26 @@ def stragglers(world):
         n = int(min(STRAY_GROUP, Hf[k] // 4))
         if n <= 0:
             continue
-        dist = rng.uniform(*STRAY_RANGE, STRAY_TRIES)
-        ang = rng.uniform(0, 2 * np.pi, STRAY_TRIES)
-        tr = np.rint(r + dist * np.sin(ang)).astype(int)
-        tc = np.rint(c + dist * np.cos(ang)).astype(int)
+        far = pr.size > 0 and rng.random() < STRAY_FAR
+        if far:                                          # a city or port within reach, bigger ones likelier
+            dc = np.abs(pc - c)
+            if world.wrap:
+                dc = np.minimum(dc, world.cols - dc)
+            d = np.hypot(pr - r, dc)
+            ok = (d >= STRAY_FAR_RANGE[0]) & (d <= STRAY_FAR_RANGE[1])
+            ok &= (mass[pr, pc] == mass[r, c]) & (near8[pr, pc] == 0)
+            idx = np.flatnonzero(ok)
+            if idx.size == 0:
+                continue
+            w = pw[idx] / pw[idx].sum()
+            pick = rng.choice(idx, size=min(STRAY_TRIES, idx.size), replace=False, p=w)
+            tr = pr[pick] + rng.integers(-1, 2, pick.size)
+            tc = pc[pick] + rng.integers(-1, 2, pick.size)
+        else:
+            dist = rng.uniform(*STRAY_RANGE, STRAY_TRIES)
+            ang = rng.uniform(0, 2 * np.pi, STRAY_TRIES)
+            tr = np.rint(r + dist * np.sin(ang)).astype(int)
+            tc = np.rint(c + dist * np.cos(ang)).astype(int)
         if world.wrap:
             tc %= world.cols
         for r2, c2 in zip(tr, tc):
@@ -217,6 +266,9 @@ def stragglers(world):
                 break                                    # turned back at the border
             ratio = min(1.0, Zf[k] / max(Hf[k], 1))
             p = min(1.0, ratio * STRAY_BITTEN + STRAY_BASE)
+            if dest:                                     # a mobilized country screens who comes in (better once
+                dc_ = world.civs[int(dest)]               # it has learned how: resolve.py)
+                p *= 1.0 - STRAY_SCREEN * min(1.0, dc_.alert * (0.5 + 0.5 * getattr(dc_, "resolve", 0.0)) * 1.5)
             bitten = int(rng.binomial(n, p)) if world.stochastic else int(n * p)
             Hf[k] -= n
             H[r2, c2] += n - bitten

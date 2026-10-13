@@ -65,6 +65,23 @@ def shift(a, dr, dc, wrap, fill=0):
     return a
 
 
+def pad1(a, fill, wrap):
+    """`a` with a one-tile border (columns wrapping round when `wrap`): nb(p, dr, dc) is then the neighbour at offset
+    (dr, dc) of every tile as a view - like shift(), without copying the whole array for every direction."""
+    p = np.empty((a.shape[0] + 2, a.shape[1] + 2), dtype=a.dtype)
+    p[1:-1, 1:-1] = a
+    p[0], p[-1] = fill, fill
+    if wrap:
+        p[1:-1, 0], p[1:-1, -1] = a[:, -1], a[:, 0]
+    else:
+        p[1:-1, 0], p[1:-1, -1] = fill, fill
+    return p
+
+
+def nb(p, dr, dc):
+    return p[1 + dr:p.shape[0] - 1 + dr, 1 + dc:p.shape[1] - 1 + dc]
+
+
 class Statics:
     """Things that depend only on the terrain, worked out once per map."""
 
@@ -92,6 +109,8 @@ class Statics:
                 c2 = c2 % cols
             bad = (r2 < 0) | (r2 >= rows) | (c2 < 0) | (c2 >= cols)
             self.nbr[(dr, dc)] = np.where(bad, -1, r2 * cols + c2).astype(np.int64)
+        # 0 land, 1 shallow, 2 deep (one lookup instead of three in the movement rules)
+        self.kind = np.where(self.land, 0, np.where(self.shallow, 1, 2)).astype(np.int8).ravel()
 
     def _sea_distance(self, world, steps=400):
         """Steps over water to the nearest land (0 on land)."""
@@ -263,7 +282,8 @@ class _Grid:
         self.resist = None if resist is None else resist.ravel()
         self.qfac = None if qfac is None else qfac.ravel()
         self.qheavy = qheavy
-        self.virulence = getattr(world, "virulence", 1.0)
+        meta = getattr(world, "meta", None) or {}
+        self.virulence = getattr(world, "virulence", 1.0) * float(meta.get("virulence_scale", 1.0))
         self.shut = None
         if closed:
             arr = np.zeros(len(world.civs), dtype=bool)
@@ -271,12 +291,15 @@ class _Grid:
             self.shut = arr[self.O]
 
     def rand(self, n):
-        return self.rng.random(n).astype(np.float32) if self.stochastic else np.full(n, 0.5, dtype=np.float32)
+        return self.rng.random(n, dtype=np.float32) if self.stochastic else np.full(n, 0.5, dtype=np.float32)
 
     def jitter(self, n):
         if not self.stochastic:
             return np.float32(1.0)
-        return (1.0 - JITTER + 2.0 * JITTER * self.rng.random(n)).astype(np.float32)
+        j = self.rng.random(n, dtype=np.float32)
+        j *= 2.0 * JITTER
+        j += 1.0 - JITTER
+        return j
 
 
 def _bites(g, h, z, share):
@@ -300,45 +323,51 @@ def _bites(g, h, z, share):
     z[i] = np.maximum(zi + bite - kill, 0)
 
 
+_SWIM_RATE = np.array([0.0, SWIM_SHALLOW, SWIM_DEEP], dtype=np.float32)     # land -> land / shallow / deep
+_SEA_RATE = np.array([0.0, ALONG_SHORE, OUT_TO_SEA], dtype=np.float32)       # shallow -> ... (share of the difference)
+
+
 def _move_zombies(g, h, z):
     S = g.S
     src = np.flatnonzero(z > 0)
     if src.size == 0:
         return
     nz = z[src]
-    lnd, shl, dep = g.land[src], g.shallow[src], g.deep[src]
+    ks = S.kind[src]
+    lnd, shl, dep = ks == 0, ks == 1, ks == 2
     people = h > 5
-    outs, tgts = [], []
+    L, W = np.flatnonzero(lnd), np.flatnonzero(shl)          # zombies on land, in the shallows
+    nl, nw = nz[L], nz[W]
+    can_swim = (nl >= SWIM_MIN).astype(np.float32)
+    out = np.zeros((4, src.size), dtype=np.float32)
+    tgts = np.empty((4, src.size), dtype=np.int64)
     for k, d in enumerate(ZOMBIE_DIRS):
         t = S.nbr[d][src]
         valid = t >= 0
         tc = np.where(valid, t, 0)
-        ok = valid & ~g.blocked[tc]
-        l1, sh1, dp1 = g.land[tc], g.shallow[tc], g.deep[tc]
-        z1, p1 = z[tc], people[tc]
-        a = np.zeros(src.size, dtype=np.float32)
-        onto = lnd & l1 & ok
-        mv = S.move[tc]
-        a = np.where(onto & p1, nz * mv / 5.0, a)
-        a = np.where(onto & ~p1 & (z1 < nz), (nz - z1) * mv / 3.0, a)
-        swim = lnd & ok & (nz >= SWIM_MIN)
-        a = np.where(swim & sh1, nz * SWIM_SHALLOW, a)
-        a = np.where(swim & dp1, nz * SWIM_DEEP, a)
-        s_ok = shl & ok
-        a = np.where(s_ok & l1 & p1, nz * ASHORE_PEOPLE, a)
-        a = np.where(s_ok & l1 & ~p1, nz * ASHORE, a)
-        a = np.where(s_ok & sh1 & (z1 < nz), (nz - z1) * ALONG_SHORE, a)
-        a = np.where(s_ok & dp1 & (z1 < nz), (nz - z1) * OUT_TO_SEA, a)
+        tgts[k] = tc
+        a = out[k]
+        # from land: onto land (toward people, or spreading out to where there are fewer), or into the water
+        tl = tc[L]
+        tk, z1, p1 = S.kind[tl], z[tl], people[tl]
+        to_land = tk == 0
+        a[L] = np.where(to_land, np.where(p1, nl * (1 / 5.0), np.maximum(nl - z1, 0) * (1 / 3.0)) * S.move[tl],
+                        nl * _SWIM_RATE[tk] * can_swim)
         if g.unorg[1] != 1.0:
-            a = np.where(l1 & p1 & (g.O[tc] == 0), a * g.unorg[1], a)
+            a[L] *= np.where(to_land & p1 & (g.O[tl] == 0), np.float32(g.unorg[1]), np.float32(1.0))
+        # from the shallows: ashore, along the shore, or out to sea
+        if W.size:
+            tw = tc[W]
+            tk, z1, p1 = S.kind[tw], z[tw], people[tw]
+            ashore = nw * (ASHORE + (ASHORE_PEOPLE - ASHORE) * p1)
+            a[W] = np.where(tk == 0, ashore, np.maximum(nw - z1, 0) * _SEA_RATE[tk])
+            if g.unorg[1] != 1.0:
+                a[W] *= np.where((tk == 0) & p1 & (g.O[tw] == 0), np.float32(g.unorg[1]), np.float32(1.0))
         if g.resist is not None:
-            a = a * g.resist[tc]
+            a *= g.resist[tc]
         if g.qfac is not None:
-            a = np.where(nz >= g.qheavy, a * g.qfac[tc], a)
-        a = np.where(ok, a, 0.0)
-        outs.append(a)
-        tgts.append(tc)
-    out = np.stack(outs)
+            a[:] = np.where(nz >= g.qheavy, a * g.qfac[tc], a)
+        a[~(valid & ~g.blocked[tc])] = 0.0
     # deep water: drift (a random direction) and hordes swimming for land
     deep_i = np.flatnonzero(dep)
     if deep_i.size:
@@ -357,14 +386,16 @@ def _move_zombies(g, h, z):
     tot = out.sum(axis=0)
     cap = nz * MAX_OUT
     scale = np.where(tot > cap, cap / np.maximum(tot, 1e-9), 1.0).astype(np.float32)
-    moved = np.floor(out * scale * g.jitter(src.size) + g.rand(src.size))
+    out *= scale * g.jitter(src.size)
+    out += g.rand(src.size)
+    moved = np.floor(out, out=out)
     tot = moved.sum(axis=0)
     over = tot > nz
     if over.any():
         moved[:, over] = np.floor(moved[:, over] * (nz[over] / np.maximum(tot[over], 1e-9)))
         tot = moved.sum(axis=0)
     z[src] = nz - tot
-    z += np.bincount(np.concatenate(tgts), weights=moved.ravel(), minlength=g.n).astype(np.float32)
+    _scatter_add(z, tgts.ravel(), moved.ravel())
     if deep_i.size:
         dd_ = np.flatnonzero(g.deep & (z > 0))
         stray = z[dd_] < SEA_HORDE
@@ -372,6 +403,11 @@ def _move_zombies(g, h, z):
         loss = np.floor(z[dd_] * rate + (g.rand(dd_.size) if g.stochastic else 0.0))
         loss = np.where(stray & (g.rand(dd_.size) < STRAY_LOSS / MOVE_PASSES), z[dd_], loss)
         z[dd_] = np.maximum(z[dd_] - loss, 0)
+
+
+def _scatter_add(a, idx, w):
+    """a[idx] += w, summing repeats (np.add.at: fast in numpy 2)."""
+    np.add.at(a, idx, w.astype(a.dtype, copy=False))
 
 
 def _move_people(g, h, z, d):
@@ -399,7 +435,7 @@ def _move_people(g, h, z, d):
     scale = np.where(tot > hs, hs / np.maximum(tot, 1e-9), 1.0)
     out = np.floor(out * scale)
     h[src] = hs - out.sum(axis=0)
-    h += np.bincount(np.concatenate(tgts), weights=out.ravel(), minlength=g.n).astype(np.float32)
+    _scatter_add(h, np.concatenate(tgts), out.ravel())
 
 
 SCREENING = 0.85           # an alerted government screens passengers: flights out carry the infection this much less
