@@ -14,11 +14,14 @@ import war
 MERGE_EVERY = 10
 REACH = 2                  # tiles apart that still count as neighbours
 MIN_CONTACT = 3            # border / near-border tile pairs needed
-KIN_CHANCE = 0.45          # per check, fragments of one former country
-STRANGER_CHANCE = 0.12     # per check, unrelated colonies
+KIN_CHANCE = 0.1           # per check, fragments of one former country
+STRANGER_CHANCE = 0.03     # per check, unrelated colonies
+CALM_MERGE = 0.3           # x this when neither faces zombies: in peacetime, states settle down as they are
+MERGE_MAX_KIN = 1.2        # a merger never makes a country bigger than this x its former country's populated land ...
+MERGE_MAX_TILES = 600      # ... or, for unrelated states, than this many populated tiles (no supercountries by merger)
 MERGE_MORALE_BONUS = 1
 MIN_MORALE = 4             # a collapsing government isn't a partner
-SPLIT_COOLDOWN = 150       # a state that broke away doesn't rejoin anyone for this long
+SPLIT_COOLDOWN = 400       # a state that broke away doesn't rejoin anyone for this long
                            # (forms of government also matter: republics merge readily, warlords hardly ever)
 
 
@@ -43,6 +46,30 @@ def neighbours(world, reach=REACH):
                 for k, v in zip(keys, n):
                     counts[(int(k // 1000), int(k % 1000))] = counts.get((int(k // 1000), int(k % 1000)), 0) + int(v)
     return counts
+
+
+def _fighting(c):
+    from civilization import CALM_ZOMBIES
+    return bool(c.m) and c.m.get("zone_z", 0) >= CALM_ZOMBIES
+
+
+def _home_size(world, root):
+    """Populated tiles of country `root` before the outbreak (cached)."""
+    cache = world.__dict__.setdefault("_home_size", {})
+    if root not in cache:
+        cache[root] = int(((world.O0 == root) & (world.H0 > 10)).sum())
+    return cache[root]
+
+
+def too_big(world, a, b):
+    """Would `a` and `b` together be too big to hold together (more than their former country, or for unrelated
+    states MERGE_MAX_TILES populated tiles)?  Also when the bigger one is overextended already (fracture.py)."""
+    na = int(a.m.get("n", 0)) if a.m else 0
+    nb = int(b.m.get("n", 0)) if b.m else 0
+    if not getattr(a if na >= nb else b, "_abroad_ok", True):
+        return True
+    cap = MERGE_MAX_KIN * max(_home_size(world, a.root), 1) if a.root == b.root else MERGE_MAX_TILES
+    return na + nb > cap
 
 
 def merge(world, big, small, why=""):
@@ -87,7 +114,11 @@ def step(world):
         kin = ca.root == cb.root
         if not kin and not (ca.successor and cb.successor):
             continue                               # separate nations stay separate
+        if too_big(world, ca, cb):
+            continue                               # (that would be too big to hold together)
         p = (KIN_CHANCE if kin else STRANGER_CHANCE) * govern.mod(ca, "merge") * govern.mod(cb, "merge")
+        if not (_fighting(ca) or _fighting(cb)):
+            p *= CALM_MERGE
         if ca.gov != cb.gov:
             p *= 0.6
         if ca.famine != cb.famine:

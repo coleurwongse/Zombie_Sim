@@ -16,10 +16,11 @@ Civil war    (world.civil_wars, on by default) a region that breaks away may not
              only give way to the zombies when things are truly desperate.  They end when one side is too weak to
              go on - it is absorbed (the country reunited by force) - or after a long stalemate (independence).
 Fighting     every FIGHT_EVERY ticks: where the two touch, people die on both sides of the border (more for the
-             weaker side and where defense is low), materials are burned, armies shrink, and a clearly stronger
-             side captures weakly defended border tiles.  Where they don't touch (the United States and Iran), it's
-             a war of air and missile strikes on each other's cities every STRIKE_EVERY ticks.  A long war wears
-             morale down.
+             weaker side, where defense is low, less on rough ground), materials are burned, armies shrink, and a
+             clearly stronger side captures weakly defended border tiles (rough ground less easily).  Where they
+             don't touch (the United States and Iran), it's a war of air and missile strikes on each other's cities
+             every STRIKE_EVERY ticks - and strikes behind the front in a border war too.  Raids on towns, partisans
+             in taken rough country and sea landings: warfare.py.  A long war wears morale down.
 Peace        after PEACE_MIN ticks either side may sue for peace (more likely as the war drags on);
              a zombie emergency or a collapse ends it at once.
 """
@@ -28,6 +29,7 @@ import numpy as np
 from terrain import is_land
 
 import govern
+import warfare
 from civilization import box_sum
 
 CHECK_EVERY = 10
@@ -62,6 +64,8 @@ STRIKE_MIN_ARMY = 0.25
 STRIKE_RANGE = 70         # tiles between capitals a strike can reach ...
 GLOBAL_REACH = 0.9        # ... unless the attacker's army is this strong (carriers, bombers, missiles)
 RIVAL_CHANCE = 0.003      # per check: old rivals go to war (x (1 + 3 x scarcity) x aggression)
+ROUGH_SAVES = 0.4          # defenders on rough ground (warfare.roughness) lose this much fewer ...
+ROUGH_HOLDS = 0.6          # ... and their ground is this much harder to take
 DISTANT_WEARY_EVERY = 45  # a war fought far away wears morale down much more slowly
 
 
@@ -135,13 +139,14 @@ def border(world, a, b):
     return contacts(world).get((min(a, b), max(a, b)), 0)
 
 
-def maybe_civil_war(world, parent, rebel, why="it won't let the region go"):
-    """Called when `rebel` breaks away from `parent`: maybe the old government fights to take it back."""
+def maybe_civil_war(world, parent, rebel, why="it won't let the region go", chance=1.0):
+    """Called when `rebel` breaks away from `parent`: maybe the old government fights to take it back (x `chance`:
+    less over provinces it was overstretched to hold anyway)."""
     if not getattr(world, "civil_wars", True) or parent.collapsed or not parent.ai:
         return
     if _danger(parent) > CIVIL_CRISIS:
         return
-    p = CIVIL_AT_SPLIT * parent.traits.get("aggression", 1.0) * govern.mod(parent, "aggression")
+    p = CIVIL_AT_SPLIT * chance * parent.traits.get("aggression", 1.0) * govern.mod(parent, "aggression")
     if world.pyrng.random() < p:
         declare(world, parent.id, rebel.id, why, civil=True)
 
@@ -172,6 +177,9 @@ def step(world):
                 _fight(world, w)
             elif world.ticks % STRIKE_EVERY == 0:
                 _strikes(world, w)
+        if close and world.ticks % warfare.FRONT_STRIKE_EVERY == 0:
+            _strikes(world, w, warfare.FRONT_STRIKE_ARMY)  # (artillery and air strikes behind the front too)
+        warfare.step(world, w)                            # (raids, partisans, landings: warfare.py)
         if w["ticks"] % (WEARY_EVERY if close else DISTANT_WEARY_EVERY) == 0:
             for c in (ca, cb):                         # a long war wears a country down - it doesn't topple it alone
                 if c.morale > WEARY_FLOOR:
@@ -197,10 +205,18 @@ def _civil_outcome(world, k, w):
         return False
     if pb < CIVIL_ABSORB * pa or pa < CIVIL_ABSORB * pb:
         big, small = (ca, cb) if pa >= pb else (cb, ca)
+        if union.too_big(world, big, small):           # (it can't hold more: the breakaway keeps its independence)
+            end(world, k, "independence")
+            return True
         world.wars.pop(k)
         union.merge(world, big, small, "won the civil war")
         return True
     return False
+
+
+def _too_big(world, a, b):
+    import union
+    return union.too_big(world, a, b)
 
 
 def _consider(world):
@@ -214,6 +230,7 @@ def _consider(world):
         if getattr(world, "civil_wars", True) and ca.morale >= 7 and ca.military >= 0.35:
             for cb in live:
                 if (cb.split_from == ca.id and not at_war(world, cb.id) and _danger(cb) < CRISIS
+                        and not _too_big(world, ca, cb)
                         and touching.get((min(ca.id, cb.id), max(ca.id, cb.id)), 0) >= MIN_BORDER
                         and world.pyrng.random() < CIVIL_LATER * govern.mod(ca, "aggression")):
                     declare(world, ca.id, cb.id, "to reunite the country", civil=True)
@@ -269,8 +286,10 @@ def _fight(world, w):
     w["quiet"] = 0
     sa = 0.25 + ca.military * (0.6 + 0.8 * ca.strength)
     sb = 0.25 + cb.military * (0.6 + 0.8 * cb.strength)
+    rough = warfare.roughness(T)                          # (rough ground: its defenders lose fewer ...)
     for civ, edge, own, other in ((ca, edge_a, sa, sb), (cb, edge_b, sb, sa)):
-        frac = FIGHT_LOSS * 2 * other / (own + other) * world.jitter(0.3) * (1 - np.minimum(D, 9) / 11.0)
+        frac = (FIGHT_LOSS * 2 * other / (own + other) * world.jitter(0.3) * (1 - np.minimum(D, 9) / 11.0)
+                * (1.0 - ROUGH_SAVES * rough))
         deaths = np.where(edge, np.maximum(1, np.ceil(H * frac)), 0).astype(np.int32)
         deaths = np.minimum(deaths, np.maximum(H, 0))
         H -= deaths
@@ -286,9 +305,13 @@ def _fight(world, w):
         prey = lm & near_win & (D <= (5 if w.get("civil") else 4)) & (H < (120 if w.get("civil") else 60)) & is_land(T)
         if not prey.any():
             continue
-        take = prey & (world.rng.random(H.shape) < CAPTURE_CHANCE * min(2.0, sw / sl - (ratio - 0.4)))
+        take = prey & (world.rng.random(H.shape) < CAPTURE_CHANCE * min(2.0, sw / sl - (ratio - 0.4))
+                       * (1.0 - ROUGH_HOLDS * rough))         # (... and it is harder to take)
         if take.any():
             O[take] = win_c.id
+            ys, xs = np.nonzero(take)                         # (remembered: partisans fight on there - warfare.py)
+            w.setdefault("taken", {}).setdefault(win_c.id, []).extend(
+                ((ys + (win[0].start or 0)) * world.cols + xs + (win[1].start or 0)).tolist())
             D[take] = np.minimum(D[take], 2)
             w.setdefault("captured", {}).setdefault(win_c.id, 0)
             w["captured"][win_c.id] += int(take.sum())
@@ -296,11 +319,11 @@ def _fight(world, w):
                 world.note(f"{win_c.name} takes ground from {lose.name}")
 
 
-def _strikes(world, w):
-    """Nations at war that don't touch bomb each other's cities instead."""
+def _strikes(world, w, min_army=STRIKE_MIN_ARMY):
+    """Air and missile strikes on the enemy's cities (all a war is, between nations that don't touch)."""
     H, D = world.H, world.D
     for att, tgt in ((world.civs[w["a"]], world.civs[w["b"]]), (world.civs[w["b"]], world.civs[w["a"]])):
-        if att.military < STRIKE_MIN_ARMY or att.materials < STRIKE_COST * 2:
+        if att.military < min_army or att.materials < STRIKE_COST * 2:
             continue
         if att.capital is not None and tgt.capital is not None and att.strength < GLOBAL_REACH:
             dr = abs(att.capital[0] - tgt.capital[0])

@@ -247,7 +247,7 @@ def main():
     H, Z, D, T, O, A = blank(); H, Z, D, T, O = H[:20, :45], Z[:20, :45], D[:20, :45], T[:20, :45], O[:20, :45]
     Z[10, 44] = 60
     w = DW(H, Z, D, T, O, A); run(w, 30)
-    assert w.Z[10, 0] > 0 or w.Z[10, 1] > 0
+    assert w.Z[5:16, :3].sum() > 0
     print("12 non-square map runs; zombies wrap across the edge")
 
 
@@ -366,7 +366,7 @@ def main():
             w.civs[1].morale = 9; w.tick()
         return int(np.clip(w.H[:, 20:], 0, None).sum()), int(w.Z[:, 20:].sum()), int(w.D[:, 25:].max())
     h_own, z_own, _ = prey(True); h_un, z_un, d_un = prey(False)
-    assert z_un > z_own and h_un < h_own, (h_own, z_own, h_un, z_un, d_un)
+    assert h_un < 0.5 * h_own and z_un > 0.9 * z_own, (h_own, z_own, h_un, z_un, d_un)   # (marching hordes fill both)
     print("27 same horde: governed land keeps %d people (%d zombies in), unorganized land %d (%d zombies in)" %
           (h_own, z_own, h_un, z_un))
 
@@ -378,11 +378,19 @@ def main():
         for c in (c1, c2):
             c.successor = successors; c.next_decision = 10 ** 9
         c2.root = c1.root if root_same else 2
+        if root_same:
+            w.O0[:] = 1                                     # (fragments of one country: all its land was country 1's)
         w.ticks = 1; w.tick(); c1.materials, c2.materials = 100.0, 50.0
         if at_war: war.declare(w, 1, 2)
-        for _ in range(80):
-            for c in (c1, c2): c.morale = 9
-            w.tick()
+        import union
+        keep = union.KIN_CHANCE, union.STRANGER_CHANCE
+        union.KIN_CHANCE = union.STRANGER_CHANCE = 10.0
+        try:
+            for _ in range(80):
+                for c in (c1, c2): c.morale = 9
+                w.tick()
+        finally:
+            union.KIN_CHANCE, union.STRANGER_CHANCE = keep
         return w
     w = pair(True)
     gone = [c for c in w.civs[1:3] if c.collapsed]; kept = [c for c in w.civs[1:3] if not c.collapsed]
@@ -759,9 +767,11 @@ def main():
         holdouts.HOLDOUT_CHANCE = keep
     print("56 holdouts: a besieged city barricades itself (for its government; or as the %s)" % held.name)
 
-    # 57. Overextension: a big country that has grown fast may split in two.
-    H, Z, D, T, O, A = blank(60, humans=100)
+    # 57. Overextension: a big country that has grown fast onto another country's land may split in two.  (Regrowing
+    #     over its own land is no reason to fall apart.)
+    H, Z, D, T, O, A = blank(60, humans=100); O[:, 30:] = 2
     w = DW(H, Z, D, T, O, A); w.tick(); civ = w.civs[1]; civ.capital = (5, 5)
+    w.civs[2].collapsed = True; w.O[:, 30:] = 1; civ.m = civ.observe(w)
     from collections import deque
     civ.long_hist = deque([400] * 12)
     keep = fr.OVEREXTEND_CHANCE
@@ -1037,6 +1047,349 @@ def main():
     assert len(caps) >= 2 and min(gaps) >= settlers.SETTLE_SPACING, (caps, gaps)
     print("72 %s (no town of its own; Barad-dur is Mordor's); %d settler colonies at least %.0f tiles apart"
           % (s3.name, len(caps), min(gaps)))
+    # 73. A country split between two cities falls apart along the lie of the land: never a straight line, and along a
+    #     mountain range where there is one.
+    H, Z, D, T, O, A = blank(60, humans=100)
+    w = DW(H, Z, D, T, O, A)
+    part = np.ones((60, 60), dtype=bool)
+    lab = fracture.split_by_ground(w, part, [(30, 12), (30, 48)])
+    edge = [int(np.argmax(lab[r] == 1)) for r in range(60)]
+    assert max(edge) - min(edge) >= 3 and len(set(edge)) >= 4, edge             # ragged, not a straight line
+    H, Z, D, T, O, A = blank(60, humans=100); T[:, 38:41] = 3
+    w = DW(H, Z, D, T, O, A)
+    lab = fracture.split_by_ground(w, part, [(30, 12), (30, 52)])
+    edge2 = [int(np.argmax(lab[r] == 1)) for r in range(60)]
+    assert sum(36 <= e <= 42 for e in edge2) >= 50, edge2                      # along the ridge
+    print("73 border between two cities: columns %d-%d on open ground; %d of 60 rows along a mountain ridge"
+          % (min(edge), max(edge), sum(36 <= e <= 42 for e in edge2)))
+
+    # 74. Wilderness nobody ever lived on (desert) is claimed by its neighbour without settlers; emptied farmland is
+    #     only taken where the nation's people can guard it (its edge).
+    import restart
+
+    def claimed(h0_beyond, terrain):
+        H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+        H[:, :20] = 120; O[:, :20] = 1; T[:, 20:] = terrain
+        w = DW(H, Z, D, T, O, A); w.H0[:, 20:] = h0_beyond; w.refresh_wild(); w.tick()
+        w.H[:, 20:] = 0; w.O[:, 20:] = 0
+        for k in range(40):
+            w.ticks = restart.EXPAND_EVERY * (k + 10)
+            w.civs[1].morale = 9
+            restart.expand(w)
+        return int((w.O[:, 20:] == 1).sum())
+    wild, farm = claimed(0, 4), claimed(80, 1)
+    assert wild >= 200 and farm < wild, (wild, farm)
+    print("74 in 160 days a nation claims %d tiles of desert nobody lived on, but only %d of emptied farmland"
+          % (wild, farm))
+
+    # 75. A horde far from anyone (70 tiles) tracks people from afar instead of milling about.
+    import zombies as zb
+    H, Z, D, T, O, A = blank(100, humans=0, owner=0)
+    H[:, 92:] = 100; Z[45:55, 15:25] = 60
+    w = DW(H, Z, D, T, O, A, meta={"wrap": False})
+    c0 = float((np.arange(100)[None, :] * w.Z).sum() / w.Z.sum())
+    for k in range(150):
+        w.ticks = k
+        zb.far_hunt(w)
+    c1 = float((np.arange(100)[None, :] * w.Z).sum() / w.Z.sum())
+    assert c1 > c0 + 10, (c0, c1)
+    print("75 a horde 70 tiles from people moves toward them: centre column %.0f -> %.0f in 150 days" % (c0, c1))
+
+    # 76. No supercountries by merger: two unrelated states too big together stay apart.
+    import union
+    H, Z, D, T, O, A = blank(60, humans=90); O[:, 30:] = 2
+    w = DW(H, Z, D, T, O, A); w.tick()
+    for c in w.civs[1:3]:
+        c.successor = True; c.root = c.id; c.morale = 9; c.split_from = None
+    w.O0[:] = 0
+    keep = union.STRANGER_CHANCE, union.MERGE_MAX_TILES
+    union.STRANGER_CHANCE = 10.0
+    try:
+        union.MERGE_MAX_TILES = 1000                       # (1800 + 1800 populated tiles: too big)
+        w.ticks = union.MERGE_EVERY * 50; union.step(w)
+        assert not any(c.collapsed for c in w.civs[1:3])
+        union.MERGE_MAX_TILES = 5000
+        union.step(w)
+        assert sum(c.collapsed for c in w.civs[1:3]) == 1
+    finally:
+        union.STRANGER_CHANCE, union.MERGE_MAX_TILES = keep
+    print("76 two unrelated states of 1800 populated tiles each: no merger above the cap, merged below it")
+    # 77. Now and then a big horde on a coast sends a chunk of itself across the water to the next landmass - and
+    #     you can see it swimming.
+    import crossings
+    H, Z, D, T, O, A = blank(40, humans=0, owner=0)
+    T[:, 17:23] = 0                                       # a strait 6 tiles wide
+    H[:, 23:] = 80; O[:, 23:] = 1
+    Z[15:25, 10:17] = 120
+    w = DW(H, Z, D, T, O, A, meta={"wrap": False})
+    keep = crossings.CROSS_CHANCE, crossings.CROSS_EVERY
+    crossings.CROSS_CHANCE, crossings.CROSS_EVERY = 10.0, 1
+    seen_at_sea = 0
+    try:
+        for k in range(12):
+            w.ticks = k
+            crossings.step(w)
+            seen_at_sea = max(seen_at_sea, len(crossings.at_sea(w)))
+    finally:
+        crossings.CROSS_CHANCE, crossings.CROSS_EVERY = keep
+    landed = int(w.Z[:, 23:].sum())
+    assert seen_at_sea >= 4 and landed > 0, (seen_at_sea, landed)
+    print("77 a horde crossed a 6-tile strait: %d tiles of it seen at sea, %d zombies came ashore" % (seen_at_sea, landed))
+    # 78. A settlers' colony on emptied land grows: its people have children and spread over the land around it.
+    H, Z, D, T, O, A = blank(80, humans=0, owner=0)
+    H[:, :12] = 150; O[:, :12] = 1
+    w = DW(H, Z, D, T, O, A); w.H0[:, 40:] = 90; w.tick()
+    a = w.civs[1]; a.materials = 200.0; a.morale = 9; a.capital = (40, 5); a.m = a.observe(w)
+    colony = settlers.found(w, a, 40, 60)
+    lived0 = int(((w.O == colony.id) & (w.H > 10)).sum())
+    for _ in range(200):
+        w.tick()
+    lived1 = int(((w.O == colony.id) & (w.H > 10)).sum())
+    assert not colony.collapsed and lived1 >= 3 * lived0, (lived0, lived1)
+    print("78 a settlers' colony (%s) grew from %d to %d lived-on tiles in 200 days" % (colony.name, lived0, lived1))
+    # 79. Hordes choose their prey: a big city 60 tiles off over a small village half as far - and march on it as
+    #     one body (coordination 0.8); with coordination 0 they don't march at all.
+    import hordes
+
+    def horde_world(coord):
+        H, Z, D, T, O, A = blank(120, humans=0, owner=0)
+        H[55:65, 100:110] = 200; H[20:22, 30:32] = 40
+        Z[50:70, 20:35] = 9; Z[55:65, 25:30] = 60
+        w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+        w.coordination = coord
+        for k in range(60):
+            w.ticks = k
+            hordes.step(w)
+        Zf = w.Z.astype(float)
+        return w, float((np.arange(120)[None, :] * Zf).sum() / Zf.sum())
+    w, col = horde_world(0.8)
+    _, col0 = horde_world(0.0)
+    hp = w._horde_plan
+    k, (gR, gC) = hp["k"], hp["shape"]
+    rr, cc = np.nonzero(w.Z >= hordes.HORDE_Z)
+    t = hp["prey"][np.minimum(rr // k, gR - 1), np.minimum(cc // k, gC - 1)]
+    goal_col = (int(np.bincount(t[t >= 0]).argmax()) % gC + 0.5) * k
+    assert goal_col > 90 and col > 38 and col0 < 30, (goal_col, col, col0)
+    print("79 the horde went for the big city (target column %d): its centre moved from column 27 to %.0f in 60 days "
+          "(%.0f with coordination 0)" % (goal_col, col, col0))
+
+    # 80. A dense horde (255 a tile) moves as a body: room in a tile counts the zombies leaving it at the same time.
+    import zombies as zb
+    H, Z, D, T, O, A = blank(30, humans=0, owner=0)
+    Z[10:20, 5:15] = 255
+    w = DW(H, Z, D, T, O, A, meta={"wrap": False})
+    rr, cc = np.nonzero(w.Z > 0)
+    moved = zb.transport(w, rr, cc, rr, cc + 1, w.Z[rr, cc].astype(np.int64))
+    assert moved == 255 * 100 and (w.Z[10:20, 6:16] == 255).all(), moved
+    print("80 a block of 100 tiles at 255 zombies each moved one tile east as a whole (%d zombies)" % moved)
+    # 81. An island eaten bare doesn't keep its zombies: they take to the sea and head for other land.
+    H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+    T[:, :] = 0; T[10:20, 5:15] = 1; T[:, 25:] = 1
+    H[:, 30:] = 80; O[:, 30:] = 1; Z[10:20, 5:15] = 30
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    z0 = int(w.Z[10:20, 5:15].sum())
+    for k in range(40):
+        w.ticks = k
+        crossings.step(w)
+    left, landed = int(w.Z[10:20, 5:15].sum()), int(w.Z[:, 25:].sum())
+    assert left < 0.4 * z0 and landed > 0, (z0, left, landed)
+    print("81 an island nobody lives on any more: %d of its %d zombies left it by sea in 40 days, %d came ashore "
+          "on the mainland so far" % (z0 - left, z0, landed))
+    # 82. A horde crosses a strait to another country even when the two are one landmass (the Channel).
+    H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+    T[0:40, 25:30] = 0
+    O[:, :25] = 1; O[:, 30:] = 2; H[:, 32:] = 80; Z[10:25, 15:25] = 120
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    keep = crossings.CROSS_CHANCE, crossings.CROSS_EVERY
+    crossings.CROSS_CHANCE, crossings.CROSS_EVERY = 10.0, 1
+    try:
+        for k in range(20):
+            w.ticks = k
+            crossings.step(w)
+    finally:
+        crossings.CROSS_CHANCE, crossings.CROSS_EVERY = keep
+    across = int(w.Z[:40, 30:].sum())
+    assert across > 0, across
+    print("82 hordes crossed a strait between two countries of one landmass: %d zombies came ashore" % across)
+    # 83. Forms of government follow from where a state comes from: a democracy's safe, fed cities become a republic; a
+    #     fragile state's starving region falls to warlords and its empty countryside to clans; an authoritarian
+    #     state's garrisoned region in danger becomes a junta.
+    import govern
+
+    def new_gov(name, H_val, T_val, famine=False, sites=0, army=0.3, zombies=0):
+        H, Z, D, T, O, A = blank(30, humans=H_val)
+        T[:, :] = T_val
+        Z[:, :] = zombies
+        w = DW(H, Z, D, T, O, A, meta={"wrap": False, "real_pops": {"1": 1}})
+        c = w.civs[1]
+        c.name = c.name0 = name
+        c.famine, c.military = famine, army
+        c.food, c.food_use = (0.0, 1.0) if famine else (1000.0, 1.0)
+        return govern.choose(w, np.ones((30, 30), dtype=bool), c, sites=sites)
+    got = (new_gov("Germany", 150, 6), new_gov("Somalia", 40, 1, famine=True), new_gov("Somalia", 3, 4),
+           new_gov("Russia", 120, 1, sites=3, army=0.9, zombies=40))
+    assert got == ("democracy", "warlord", "tribal", "junta"), got
+    print("83 new states: Germany's safe cities -> %s, Somalia's starving region -> %s, its empty desert -> %s, "
+          "Russia's garrisoned region under attack -> %s" % got)
+    # 84. Hordes don't swim across a lake (the Sea of Rhun) - not even to another country's shore: they walk round.
+    H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+    T[10:40, 25:30] = 0; T[:, 55:] = 0                     # (a lake, and the ocean at the edge of the map)
+    O[:, :25] = 1; O[:, 30:55] = 2; H[:, 32:55] = 80; Z[10:25, 15:25] = 120
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    assert crossings.lakes(w)[20, 27] and not crossings.lakes(w)[20, 57]
+    assert crossings._route(w, 20, 24) is None
+    keep = crossings.CROSS_CHANCE, crossings.CROSS_EVERY
+    crossings.CROSS_CHANCE, crossings.CROSS_EVERY = 10.0, 1
+    try:
+        for k in range(20):
+            w.ticks = k
+            crossings.step(w)
+    finally:
+        crossings.CROSS_CHANCE, crossings.CROSS_EVERY = keep
+    assert not w.crossings and int(w.Z[:40, 30:55].sum()) == 0
+    print("84 no horde swam across the lake to the other country's shore")
+    # 85. A swimming horde doesn't land on a rock smaller than itself: only on land big enough (LANDING_MIN).
+    def coast_world(island):
+        H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+        T[:, :] = 0; T[:, :15] = 1
+        T[28:28 + island, 25:25 + island] = 1
+        Z[25:35, 10:15] = 120
+        return sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    assert crossings._route(coast_world(3), 30, 14) is None
+    path = crossings._route(coast_world(8), 30, 14)
+    assert path is not None and coast_world(8).statics.land[path[-1]]
+    print("85 a 3x3 rock is no landing; an 8x8 island is (landing %s)" % (path[-1],))
+    # 86. When a horde moves on to a bigger prize, part of it stays to finish off the village it was eating.
+    def stay_world(share):
+        keep_ = hordes.STAY_RATIO
+        hordes.STAY_RATIO = share
+        try:
+            H, Z, D, T, O, A = blank(120, humans=0, owner=0)
+            H[55:65, 100:110] = 220; H[56:60, 12:16] = 60
+            Z[50:70, 20:35] = 40
+            w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+            for k in range(30):
+                w.ticks = k
+                hordes.step(w)
+        finally:
+            hordes.STAY_RATIO = keep_
+        return int(w.Z[45:70, 0:20].sum()), int(w.Z[:, 40:].sum())
+    near0, far0 = stay_world(0.0)
+    near1, far1 = stay_world(hordes.STAY_RATIO)
+    assert near1 > 3 * max(near0, 1) and far1 > 0.3 * far0, (near0, near1, far0, far1)
+    print("86 part of the horde stayed at the village (%d zombies there, %d if all moved on) while the rest marched "
+          "on the city (%d)" % (near1, near0, far1))
+    # 87. A horde swimming to a fortified shore doesn't just evaporate: it bites people as it comes ashore.
+    H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+    T[:, 20:30] = 0
+    O[:, :20] = 1; O[:, 30:] = 2; H[:, 30:] = 120; D[:, 30:] = 7; Z[20:35, 10:20] = 150
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    h0 = int(w.H[:, 30:].sum())
+    keep = crossings.CROSS_CHANCE, crossings.CROSS_EVERY
+    crossings.CROSS_CHANCE, crossings.CROSS_EVERY = 10.0, 1
+    try:
+        for k in range(30):
+            w.ticks = k
+            crossings.step(w)
+    finally:
+        crossings.CROSS_CHANCE, crossings.CROSS_EVERY = keep
+    bitten = h0 - int(w.H[:, 30:].sum())
+    assert w._cross_log and bitten > 0, bitten
+    print("87 hordes landing on a fortified shore bit %d people as they came ashore" % bitten)
+    # 88. A fresh landing isn't shelled flat: for crossings.SURPRISE_DAYS the country's strikes can't find it.
+    def strike(landed):
+        H, Z, D, T, O, A = blank(40, humans=100)
+        Z[18:22, 18:22] = 120
+        w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+        w.tick()
+        c = w.civs[1]; c.materials, c.alert = 500.0, 1.0
+        if landed:
+            w._cross_log = [(w.ticks, 20, 20)]
+        z0 = int(w.Z[18:22, 18:22].sum()); c._purge(w)
+        return z0 - int(w.Z[18:22, 18:22].sum())
+    hit_open, hit_landed = strike(False), strike(True)
+    assert hit_open > 0 and hit_landed == 0, (hit_open, hit_landed)
+    print("88 strikes killed %d zombies of an old cluster, %d of a fresh landing (not found yet)" % (hit_open, hit_landed))
+    # 89. Villages: people nobody governs go off in small groups and settle clean, empty land a few tiles away.
+    import restart
+    H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+    H[28:32, 5:9] = 80
+    w = sim.World(H, Z, D, T, O, A, seed=3, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.H0[:, :] = 50                                         # (once-settled land all round)
+    for k in range(60):
+        w.ticks = k * restart.VILLAGE_EVERY + 2
+        restart.villages(w)
+    lived = np.argwhere(w.H > 0)
+    far = [(int(r), int(c)) for r, c in lived if not (28 <= r < 32 and 5 <= c < 9)]
+    assert len(far) >= 3 and w.villages_founded >= 3 and (w.O == 0).all(), (far, w.villages_founded)
+    print("89 %d villages founded by people nobody governs, e.g. at %s" % (w.villages_founded, far[:3]))
+    # 90. Land use: a country rebuilding in peace clears forest next to its fields and builds suburbs round its town;
+    #     an empty city falls into ruin.
+    import landuse
+    from terrain import FOREST as TF, URBAN as TU, SUBURBAN as TS, GRASS as TG
+    H, Z, D, T, O, A = blank(40, humans=110)
+    T[:, 30:] = TF; H[:, 30:] = 20
+    T[18:21, 10:13] = TU; H[18:21, 10:13] = 220
+    T[2:5, 2:5] = TU; H[2:5, 2:5] = 0; O[2:5, 2:5] = 0          # (a dead city)
+    w = sim.World(H, Z, D, T, O, A, seed=2, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick(); c = w.civs[1]; c._worst_damage = 0.5
+    sub0, wood0 = int((w.T == TS).sum()), int((w.T == TF).sum())
+    for k in range(40):
+        w.ticks = (k + 1) * landuse.EVERY
+        w.H[:, :30] = np.maximum(w.H[:, :30], 110)
+        w.H[2:5, 2:5] = 0
+        landuse.step(w)
+    assert (w.T == TS).sum() > sub0 and (w.T == TF).sum() < wood0 and (w.T[2:5, 2:5] != TU).all(), (
+        int((w.T == TS).sum()), int((w.T == TF).sum()))
+    print("90 land use: %d suburbs built, %d forest tiles cleared, the dead city fell into ruin"
+          % (int((w.T == TS).sum()) - sub0, wood0 - int((w.T == TF).sum())))
+    # 91. An emptied continent fills fast: a government with no zombies about sends its pioneers far beyond its border.
+    def pioneers(calm):
+        H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+        H[:, :10] = 120; O[:, :10] = 1
+        if not calm:
+            Z[0, 59] = 200                                   # (a horde far off - but in its region)
+        w = sim.World(H, Z, D, T, O, A, seed=4, stochastic=True, meta={"wrap": False, "res": 0.5})
+        w.H0[:, :] = 60
+        for _ in range(60):
+            w.Z[0, 59] = 0 if calm else 200
+            w.tick()
+        cols = np.nonzero((w.H > 10).any(axis=0))[0]
+        return int(cols.max())
+    far_calm, far_busy = pioneers(True), pioneers(False)
+    assert far_calm > far_busy, (far_calm, far_busy)
+    print("91 settled out to column %d with no zombies about (%d with a horde in the region)" % (far_calm, far_busy))
+    # 92. War beyond the border: raids on towns, partisans in taken rough country, a landing from the sea.
+    import warfare
+    H, Z, D, T, O, A = blank(40, humans=120); O[:, 20:] = 2
+    T[:, 26:30] = 2                                          # (woods on 2's side)
+    w = DW(H, Z, D, T, O, A); w.tick()
+    for c in w.civs[1:]: c.next_decision = 10 ** 9
+    war.declare(w, 1, 2); wr = next(iter(w.wars.values()))
+    a, b_ = w.civs[1], w.civs[2]
+    a.military, a.materials, b_.materials = 0.9, 50.0, 50.0
+    a.traits["aggression"] = 100.0
+    h0, m0 = int(w.H[:, 20:].sum()), a.materials
+    warfare._raid(w, wr, a, b_)
+    assert int(w.H[:, 20:].sum()) < h0 and a.materials > m0
+    w.O[:, 26:30] = 1                                        # (1 has taken the woods)
+    wr["taken"] = {1: list(np.flatnonzero((w.O == 1).ravel() & (w.T == 2).ravel()))}
+    w.stochastic = True
+    for _ in range(60):
+        warfare._guerrillas(w, wr)
+    back = int((w.O[:, 26:30] == 2).sum())
+    assert back > 0, back
+    H, Z, D, T, O, A = blank(40, humans=120); T[:, 15:25] = 0; O[:, 25:] = 2; H[:, 15:25] = 0; O[:, 15:25] = 0
+    w = sim.World(H, Z, D, T, O, A, seed=5, stochastic=True, meta={"wrap": False, "res": 0.5, "ports": [[20, 14, 5]]})
+    w.tick()
+    for c in w.civs[1:]: c.next_decision = 10 ** 9
+    war.declare(w, 1, 2); wr = next(iter(w.wars.values()))
+    a = w.civs[1]; a.military, a.materials = 0.9, 100.0; a.traits["aggression"] = 100.0
+    warfare._landing(w, wr, a, w.civs[2])
+    head = int((w.O[:, 25:] == 1).sum())
+    assert head > 0, head
+    print("92 a raid on a town carried off stores; partisans took back %d wooded districts; a landing took a "
+          "beachhead of %d districts" % (back, head))
     print("all civ tests passed")
 
 

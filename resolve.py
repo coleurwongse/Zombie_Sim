@@ -88,6 +88,19 @@ def rot(world):
         hit = (world.rng.random(rr.size) < DUST_ROT) if world.stochastic else np.zeros(rr.size, dtype=bool)
         Zw[rr[hit], cc[hit]] = 0
     lone = (Zw > 0) & alone
+    import zombies                                      # (a horde on the march toward people isn't starving yet)
+    way, far = zombies.far_scent(world)
+    k = zombies.FAR_CELL
+    gr = np.arange(win[0].start or 0, (win[0].start or 0) + Zw.shape[0]) // k
+    gc = np.arange(win[1].start or 0, (win[1].start or 0) + Zw.shape[1]) // k
+    lone &= ~(way[np.ix_(gr, gc)] >= 0)
+    plan_ = getattr(world, "_horde_plan", None)          # (nor is a horde marching on a target: hordes.py)
+    if plan_ is not None:
+        hk = plan_["k"]
+        R, C = plan_["shape"]
+        hr = np.minimum(np.arange(win[0].start or 0, (win[0].start or 0) + Zw.shape[0]) // hk, R - 1)
+        hc = np.minimum(np.arange(win[1].start or 0, (win[1].start or 0) + Zw.shape[1]) // hk, C - 1)
+        lone &= ~(plan_["dirs"][np.ix_(hr, hc)] >= 0)
     rr, cc = np.nonzero(lone)
     if rr.size == 0:
         return

@@ -25,11 +25,11 @@ NEED_DANGER = 0.45
 NEED_POP = 300
 FOOD_SURPLUS_TICKS = 60     # granaries above this many ticks of food can give ...
 FOOD_SHARE = 0.08           # ... this share of the surplus per round
-MISSIONS_PER_DONOR = 2
-MISSION_CHANCE = 0.35       # per round, a donor with room for another mission sends one (x its generosity)
-MISSION_TICKS = 60
+MISSIONS_PER_DONOR = 4
+MISSION_CHANCE = 0.6        # per round, a donor with room for another mission sends one (x its generosity)
+MISSION_TICKS = 90
 SWEEP_EVERY = 2
-SWEEP_TILES = 18            # tiles swept per wave by an average-sized donor (x its size)
+SWEEP_TILES = 28            # tiles swept per wave by an average-sized donor (x its size)
 SWEEP_KILL = 0.35           # share of the zombies killed on a swept tile (x (0.5 + army strength))
 SWEEP_REACH = 4             # how far out from the recipient's people the troops go
 SWEEP_COST = 0.004          # materials per zombie killed
@@ -40,7 +40,7 @@ AIRLIFT = 0.85              # army strength that can reach anyone by air
 def _ok_donor(world, c):
     if not c.ai or c.collapsed or c.is_anarchy or not c.m or c.famine:
         return False
-    return (c.danger(c.m)[0] < DONOR_DANGER and c.military >= DONOR_ARMY and c.materials >= DONOR_MATERIALS
+    return (c.threat(c.m) < DONOR_DANGER and c.m.get("damage", 0.0) < 0.5 and c.military >= DONOR_ARMY and c.materials >= DONOR_MATERIALS
             and c.size(world) >= DONOR_SIZE)
 
 
@@ -130,7 +130,7 @@ def _run_missions(world):
     for m in world.missions:
         d, r = world.civs[m["donor"]], world.civs[m["to"]]
         if (world.ticks >= m["until"] or d.collapsed or r.collapsed or not d.m
-                or d.danger(d.m)[0] >= 0.35 or d.military < 0.25 or d.materials < 10 or not _friends(world, d, r)):
+                or d.threat(d.m) >= 0.35 or d.military < 0.25 or d.materials < 10 or not _friends(world, d, r)):
             continue
         _sweep(world, d, r)
         keep.append(m)
@@ -145,6 +145,10 @@ def _sweep(world, d, r):
     if not owned.any() or not Zw.any():
         return 0
     weight = np.where(owned, 3.0, np.where(within(world, owned, SWEEP_REACH, win), 1.0, 0.0))
+    import crossings
+    hidden = crossings.surprise(world)                   # (a fresh landing: not found yet)
+    if hidden is not None:
+        weight = np.where(hidden[win], 0.0, weight)
     rr, cc = np.nonzero((weight > 0) & (Zw >= 3))
     if rr.size == 0:
         return 0

@@ -39,6 +39,9 @@ SEA_LOSS = 0.004           # deep water: share lost per tick ...
 STRAY_LOSS = 0.03          # ... and the chance a lone straggler (fewer than SEA_HORDE) is lost, per tick
 STRAY_LANDWARD = 0.5       # a straggler drifts toward land this often (otherwise a random direction)
 ZOMBIE_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+SPREAD = 1 / 8.0             # zombies spread out toward a neighbour with fewer: this share of the difference per pass
+                             # (more than 1/8 to each of 4 neighbours overshoots: crowded and empty tiles swap places
+                             #  every pass and a horde turns into a checkerboard)
 HUMAN_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (-1, 1), (1, -1), (2, 0), (-2, 0), (0, 2), (0, -2))
 
 
@@ -284,6 +287,8 @@ class _Grid:
         self.qheavy = qheavy
         meta = getattr(world, "meta", None) or {}
         self.virulence = getattr(world, "virulence", 1.0) * float(meta.get("virulence_scale", 1.0))
+        import hordes                                    # (organized hordes don't drift apart: hordes.COORD_DAMP)
+        self.spread = np.float32(SPREAD * (1.0 - hordes.COORD_DAMP * hordes.coordination(world)))
         self.shut = None
         if closed:
             arr = np.zeros(len(world.civs), dtype=bool)
@@ -351,7 +356,7 @@ def _move_zombies(g, h, z):
         tl = tc[L]
         tk, z1, p1 = S.kind[tl], z[tl], people[tl]
         to_land = tk == 0
-        a[L] = np.where(to_land, np.where(p1, nl * (1 / 5.0), np.maximum(nl - z1, 0) * (1 / 3.0)) * S.move[tl],
+        a[L] = np.where(to_land, np.where(p1, nl * (1 / 5.0), np.maximum(nl - z1, 0) * g.spread) * S.move[tl],
                         nl * _SWIM_RATE[tk] * can_swim)
         if g.unorg[1] != 1.0:
             a[L] *= np.where(to_land & p1 & (g.O[tl] == 0), np.float32(g.unorg[1]), np.float32(1.0))

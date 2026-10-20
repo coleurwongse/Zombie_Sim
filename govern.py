@@ -1,7 +1,8 @@
 """Forms of government.
 
 The original nations are "national" governments.  When a nation breaks apart (fracture.py) or survivors organize
-(restart.py), each new state gets a form of government that suits where it came from:
+(restart.py), each new state gets the form of government that best fits where it came from (see choose): the
+political tradition of its old country first, then what it breaks away from, then its circumstances:
 
   junta      military authoritarian.  Grows out of regions held by the army (fortified sites, garrisons, a strong
              army).  Trains soldiers fast, keeps order by force (less unrest, morale falls slowly), aggressive,
@@ -34,35 +35,114 @@ def mod(civ, key):
     return GOV.get(getattr(civ, "gov", "national"), GOV["national"])[KEYS.index(key)]
 
 
+# What political tradition a region inherits from the country it belonged to before the outbreak (world map; on the
+# hand-drawn maps a realm's own starting government is its tradition).  Rough, deliberately: established democracies,
+# fragile states (no working government for years, militias, clans), and - the rest - authoritarian states.
+DEMOCRACIES = {
+    "United States", "Canada", "Mexico", "Brazil", "Argentina", "Chile", "Uruguay", "Paraguay", "Peru", "Colombia",
+    "Ecuador", "Bolivia", "Costa Rica", "Panama", "Dominican Republic", "Jamaica", "Trinidad and Tobago", "Guyana",
+    "Suriname", "Guatemala", "Honduras", "El Salvador", "Belize", "Bahamas",
+    "United Kingdom", "Ireland", "Iceland", "Norway", "Sweden", "Finland", "Denmark", "Estonia", "Latvia", "Lithuania",
+    "Poland", "Germany", "Netherlands", "Belgium", "Luxembourg", "France", "Spain", "Portugal", "Italy", "Malta",
+    "Switzerland", "Austria", "Czech Republic", "Czechia", "Slovakia", "Slovenia", "Croatia", "Hungary", "Romania",
+    "Bulgaria", "Greece", "Cyprus", "Moldova", "Ukraine", "Georgia", "Armenia", "Montenegro", "North Macedonia",
+    "Albania", "Serbia", "Bosnia and Herzegovina", "Kosovo", "Israel",
+    "India", "Nepal", "Bhutan", "Sri Lanka", "Bangladesh", "Mongolia", "Japan", "South Korea", "Taiwan",
+    "Philippines", "Indonesia", "Malaysia", "Timor-Leste", "East Timor", "Papua New Guinea", "Australia",
+    "New Zealand", "Fiji", "Solomon Islands", "Vanuatu",
+    "South Africa", "Botswana", "Namibia", "Lesotho", "Mauritius", "Ghana", "Senegal", "Cabo Verde", "Cape Verde",
+    "Zambia", "Malawi", "Kenya", "Madagascar", "Liberia", "Sierra Leone", "Benin", "Tunisia",
+}
+FRAGILE = {
+    "Somalia", "Somaliland", "South Sudan", "Sudan", "Rapid Support Forces", "Yemen", "Houthis", "Afghanistan",
+    "DR Congo", "Democratic Republic of the Congo", "Central African Republic", "Chad", "Syria", "Haiti", "Libya",
+    "Mali", "Burkina Faso", "Niger", "Ethiopia", "Iraq", "Myanmar", "Myanmar Resistance", "Eritrea", "Burundi",
+    "Guinea-Bissau", "Mozambique", "Cameroon", "Lebanon", "Palestine", "Gaza", "Western Sahara",
+}
+HERITAGE_BIAS = {          # tradition -> how much it favours each form of government in a new state
+    "democratic":    {"democracy": 1.2, "junta": 0.0, "warlord": 0.0, "tribal": 0.1},
+    "authoritarian": {"democracy": 0.1, "junta": 1.0, "warlord": 0.3, "tribal": 0.1},
+    "fragile":       {"democracy": 0.0, "junta": 0.3, "warlord": 0.9, "tribal": 0.7},
+    "mixed":         {"democracy": 0.4, "junta": 0.4, "warlord": 0.3, "tribal": 0.3},
+}
+CONTINUITY = 0.5           # a region tends to keep the form of government of the state it breaks away from
+CHOICE_NOISE = 0.15        # (the best fit wins - give or take this much: close calls can go either way)
+
+
+def tradition(world, civ):
+    """The political tradition behind government `civ`: that of the country it descends from (its root)."""
+    root = world.civs[civ.root] if civ is not None and civ.root is not None and civ.root < len(world.civs) else civ
+    if root is None:
+        return "mixed"
+    seen = set()                                        # (a settlers' colony is its own root: its founders' tradition)
+    while getattr(root, "name0", None) is None and root.split_from is not None and root.id not in seen:
+        seen.add(root.id)
+        nxt = world.civs[root.split_from]
+        root = world.civs[nxt.root] if nxt.root is not None else nxt
+    cached = getattr(root, "_tradition", None)
+    if cached:
+        return cached
+    name = getattr(root, "name0", None) or root.name
+    if (getattr(world, "meta", None) or {}).get("real_pops"):
+        t = "democratic" if name in DEMOCRACIES else "fragile" if name in FRAGILE else "authoritarian"
+    else:                                               # (hand-drawn maps: the realm's own government is its tradition)
+        t = {"democracy": "democratic", "junta": "authoritarian", "warlord": "fragile",
+             "tribal": "fragile"}.get(getattr(root, "gov0", root.gov), "mixed")
+    root._tradition = t
+    return t
+
+
 def choose(world, region, parent=None, sites=0):
-    """Pick a form of government for a new state on `region` (bool mask).  Weighted at random by circumstances."""
+    """A form of government for a new state on `region` (bool mask): the one that fits best -
+
+      tradition    the political tradition of the country the region belonged to (DEMOCRACIES / FRAGILE / the rest
+                   authoritarian; on hand-drawn maps the realm's own government) - the biggest single factor;
+      continuity   the form of government of the state it breaks away from (CONTINUITY);
+      the army     garrisons in the region and a strong army holding it together amid danger -> a junta;
+      chaos        famine, or a horde at the gates -> warlords;
+      prosperity   safe, fed, urban -> a republic;
+      the land     thinly peopled countryside -> clans.
+
+    The best fit wins, give or take a little (CHOICE_NOISE)."""
     H, T = world.H, world.T
     pop = float(np.maximum(H[region], 0).sum())
     tiles = max(1, int(region.sum()))
     density = pop / tiles
     urban = float(((T == 6) | (T == 7))[region].mean())
     near = world.zombie_near(4)
-    danger = float((np.maximum(H, 0) * (near >= 300))[region].sum()) / max(pop, 1.0)
+    danger = min(1.0, float((np.maximum(H, 0) * (near >= 300))[region].sum()) / max(pop, 1.0) * 2.0)
     fed = 1.0
     army = 0.2
     if parent is not None:
-        army = parent.military
+        army = min(1.0, parent.military)
         if parent.famine:
             fed = 0.0
         elif parent.food is not None and parent.food_use > 0:
             fed = min(1.0, parent.food / (30 * parent.food_use))
+    else:                                               # (survivors organizing: whose land was it?)
+        prev = world.last_owner[region] if getattr(world, "last_owner", None) is not None else np.zeros(0)
+        prev = prev[prev > 0]
+        if prev.size:
+            parent_like = world.civs[int(np.bincount(prev).argmax())]
+            parent = parent_like if parent_like.id else None
+    rural = max(0.0, 1.0 - density / 60.0) * (1.0 - urban)
+    held = min(1.0, sites / 2.0)
     w = {
-        "junta": 0.3 + 1.2 * min(1.0, sites / 2.0) + 1.0 * army,
-        "democracy": 0.2 + 1.2 * urban + 0.8 * fed - 1.5 * danger,
-        "warlord": 0.2 + 1.2 * danger + 1.0 * (1.0 - fed),
-        "tribal": 0.2 + 1.5 * max(0.0, 1.0 - density / 60.0) * (1.0 - urban),
+        "junta": 0.9 * held + 0.6 * army * (0.4 + danger),
+        "democracy": 0.8 * urban + 0.6 * fed * (1.0 - danger) - 0.4 * danger,
+        "warlord": 0.9 * (1.0 - fed) + 0.7 * danger,
+        "tribal": 1.0 * rural,
     }
+    trad = tradition(world, parent) if parent is not None else "mixed"
+    for k, v in HERITAGE_BIAS[trad].items():
+        w[k] += v
+    if parent is not None and getattr(parent, "gov", "national") in w:
+        w[parent.gov] += CONTINUITY
     names = list(w)
-    p = np.array([max(0.02, w[k]) for k in names])
-    if not world.stochastic:
-        return names[int(np.argmax(p))]
-    p = p ** 2 / (p ** 2).sum()                     # favour the best fit, but not always
-    return names[int(world.rng.choice(len(names), p=p))]
+    score = np.array([w[k] for k in names])
+    if world.stochastic:
+        score = score + world.rng.normal(0.0, CHOICE_NOISE, len(names))
+    return names[int(np.argmax(score))]
 
 
 def nearest_city(world, region):
@@ -81,6 +161,9 @@ def nearest_city(world, region):
     return name
 
 
+NAME_REACH = 3             # tiles: a city this close to a new state's land, nobody's, can still name it
+
+
 def free_place(world, region, near=None):
     """The city a new state is named after: the biggest named city in `region` that no living government is already
     named after (or the one at / nearest `near`, its capital, if that's free) - else the nearest free city outside."""
@@ -88,8 +171,12 @@ def free_place(world, region, near=None):
     if not cities:
         return None
     taken = {getattr(c, "place", None) for c in world.civs if not c.collapsed}
+    # (a city at the region's edge counts too, if nobody governs it: when a country falls apart its besieged big
+    #  cities often fall into anarchy and are cut out of the regions around them - the region is still that city's)
+    from civilization import box_sum
+    edge = (box_sum(region, NAME_REACH) > 0) & (world.O == 0)
     inside = [(p, n, r, c) for n, r, c, p in cities if 0 <= r < region.shape[0] and 0 <= c < region.shape[1]
-              and region[r, c] and n not in taken]
+              and (region[r, c] or edge[r, c]) and n not in taken]
     if near is not None:
         at = [x for x in inside if abs(x[2] - near[0]) <= 1 and abs(x[3] - near[1]) <= 1]
         if at:

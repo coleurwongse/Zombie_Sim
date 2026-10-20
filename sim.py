@@ -22,6 +22,9 @@ import holdouts
 import aid
 import expeditions
 import resolve
+import spread
+import landuse
+import crossings
 import settlers
 import front
 import peace
@@ -40,7 +43,12 @@ LAPSE = 0               # (off: it turns every national collapse into extinction
 LAPSE_EVERY = 10        # ... losing one level this often (a fallen country's walls crumble, they don't vanish)
 OVERSEAS_REACH = 6      # away from the landmass of its capital a government only takes land this close to what it held
                         # at the start (an overseas territory doesn't annex the continent it sits on) ...
-HOME_REACH = 25.0       # ... and on its own landmass, beyond that, only within this many degrees of its capital
+HOME_REACH = 25.0       # ... and on its own landmass, beyond that, only within about this many degrees of its capital
+WILD_H0 = 10            # wilderness: land that held at most this many people a tile (+ up to WILD_SLACK in harsh
+WILD_SLACK = 10         #   country, varying from place to place)
+ABROAD_SOFT = 0.15      # an overextended country (fracture.ABROAD_*) still takes others' land, this much as often
+HOME_RAGGED = 0.35      # (x 1 +- this, by the lie of the land: a ragged edge, not an arc - and a country holding much
+                        #  beyond it may split, its far provinces going on as a state of their own: fracture.py)
 GUARD_REACH = 3         # an emptied tile stays a government's land only within this many tiles (through its own land)
 GUARD_EVERY = 3         # ... of tiles where its people live (checked this often); land that was always empty
                         # (wilderness: ice, tundra, deep desert) is the exception - it stays its land until zombies take it
@@ -71,6 +79,7 @@ class World:
         self.civil_wars = True           # regions that break away may be fought for (war.py)
         self.nukes_allowed = True        # governments with nuclear weapons may use them (nukes.py)
         self.virulence = 1.0             # how fast zombies bite (engine.py): 1.5 = a much deadlier outbreak
+        self.coordination = 0.8          # how organized the hordes are (hordes.py): 0 = they just spread, 1 = an army
         self._statics = None
         # stochastic=False: every run with the same map is identical (tests use that)
         self.stochastic = bool(ai if stochastic is None else stochastic) and ai
@@ -133,6 +142,8 @@ class World:
             if int(k) < len(self.civs) and int(parent) < len(self.civs):
                 c = self.civs[int(k)]
                 c.split_from, c.root, c.successor, c.founded = int(parent), self.civs[int(parent)].root, True, -10 ** 4
+        for c in self.civs:                           # (what each country was at the start: govern.tradition)
+            c.name0, c.gov0 = c.name, c.gov
         self.ports = [(int(r), int(c), int(s)) for r, c, s in meta.get("ports", [])]
         self.alliance_of = {int(k): name for name, ids in meta.get("alliances", {}).items() for k in ids}
         self.rivals = {frozenset((int(a), int(b))) for a, b in meta.get("rivals", [])
@@ -159,7 +170,11 @@ class World:
                 if 0 < k < len(scale) and on_map[k] > 0 and p > 0:
                     scale[k] = float(p) / on_map[k]
         self.scale_map = scale[np.clip(self.O, 0, len(scale) - 1)].astype(np.float32)
-        self.wild = self.H0 <= 10                         # land nobody lived on: no garrison needed to hold it
+        # land nobody (or hardly anybody) lived on: no garrison needed to hold it, and a neighbour may claim it.  In
+        # harsh country (desert, tundra, ice, mountains) the line between "a few herders" and wilderness wobbles from
+        # place to place - not one country's census floor against the next's, which made old desert borders
+        # (Libya / Egypt) into straight walls
+        self.refresh_wild()
         self._guarded = None
         self.O0 = self.O.copy()
         self._near0 = None
@@ -239,6 +254,13 @@ class World:
 
     def note(self, text):
         self.events.append((self.ticks, text))
+
+    def refresh_wild(self):
+        """Work out self.wild from self.H0 (call again if H0 is changed)."""
+        from civilization import jag
+        harsh = np.isin(self.T, (3, 4, 5, 9, 10))
+        cut = WILD_H0 + np.where(harsh, WILD_SLACK * (jag(self) / 1.5 + 1.0) / 2.0, 0.0)
+        self.wild = self.H0 <= cut
 
     def add_civ(self, morale=8, name=None):
         if len(self.civs) >= MAX_CIVS:
@@ -324,6 +346,7 @@ class World:
             self._update_alarm()
             economy.step(self)
             people.step(self)
+            spread.step(self)
             boats.step(self)
             nukes.step(self)
             restart.step(self)
@@ -339,6 +362,8 @@ class World:
             resolve.step(self)
             settlers.step(self)
             self.last_hunt = zombies.hunt(self)
+            crossings.step(self)
+            landuse.step(self)
             # defenses nobody maintains fall apart (standing garrisons are the exception)
             if LAPSE and self.ticks % LAPSE_EVERY == 0:
                 lapsing = (O == 0) & (D > LAPSE) & (H > 0) & ~self.fort_mask()
@@ -447,9 +472,28 @@ class World:
         if self.wrap:
             dc = np.minimum(dc, self.cols - dc)
         dc = dc * coslat
-        reach = HOME_REACH / float(self.meta.get("res", 0.5))
+        from civilization import jag
+        reach = HOME_REACH / float(self.meta.get("res", 0.5)) * (1.0 + HOME_RAGGED * jag(self) / 1.5)
         near_capital = (dr * dr + dc * dc) <= reach * reach
         ok = (home == 0) | ((S.landmass == home) & near_capital) | (self._near0 == claimant)
+        # an overextended country (fracture.overextension) takes no more land that was another country's
+        abroad = np.ones(n, dtype=bool)
+        roots = np.arange(n)
+        for c in self.civs:
+            abroad[c.id] = getattr(c, "_abroad_ok", True)
+            roots[c.id] = c.root if c.root is not None else c.id
+        if not abroad.all():                               # (not a hard wall at its old borders: just slow)
+            o0 = self.O0
+            soft = (self.rng.random(o0.shape) < ABROAD_SOFT) if self.stochastic else False
+            ok = ok & (abroad[claimant] | (o0 == 0) | (o0 == claimant) | (o0 == roots[claimant]) | soft)
+        res = getattr(self, "colony_reserve", None)            # (a young colony's land: settlers.py)
+        if res is not None and res.any():
+            until = getattr(self, "reserve_until", {})
+            for cid, t in list(until.items()):
+                if self.ticks >= t or cid >= n or self.civs[cid].collapsed:
+                    res[res == cid] = 0
+                    until.pop(cid)
+            ok = ok & ((res == 0) | (res == claimant))
         beach = getattr(self, "beach_map", None)               # (land around an overseas landing: expeditions.py)
         return ok | (beach == claimant) if beach is not None else ok
 

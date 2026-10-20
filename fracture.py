@@ -63,6 +63,12 @@ OVEREXTEND_COOLDOWN = 120
 OVEREXTEND_GROWN = 1.5     # populated land beyond this x what its country held at the start makes it unstable ...
 OVEREXTEND_GROWN_W = 0.8   # ... this much per unit (up to 2 units)
 OVEREXTEND_SPRAWL = 15.0   # degrees: foreign land (never its country's) farther than this from the capital (90th
+OVEREXTEND_WAR = 0.4       # x the usual chance of a civil war over provinces it was overstretched to hold
+OVEREXTEND_FAR = 0.25      # populated land beyond about sim.HOME_REACH of the capital, more than this share of it ...
+OVEREXTEND_FAR_W = 2.0     # ... makes a country unstable, this much per unit: its far provinces may go their own way
+ABROAD_GROWN = 2.0         # past this x its country's old populated land (or ABROAD_FOREIGN of its people on others'
+ABROAD_FOREIGN = 0.65      #   land) a country takes others' land only slowly (sim.ABROAD_SOFT) - and is likelier to split
+OVEREXTEND_NEW_MAX = 600   # populated tiles a state founded after the outbreak may grow to on others' land
 OVEREXTEND_SPRAWL_W = 0.6  #   percentile) makes it unstable, this much per extra OVEREXTEND_SPRAWL (up to 2)
 OVEREXTEND_CONQUEST = 0.4  # land taken from other countries beyond this x its own original land makes it unstable ...
 OVEREXTEND_CONQUEST_W = 1.2  # ... this much per unit (Mexico holding half the United States: likely to split)
@@ -228,14 +234,95 @@ def _ungovernable(world, mask):
     return mask & crowded & (world.zombie_near(4) >= ANARCHY_NEAR) & (protection(world) < ANARCHY_PROT)
 
 
+#                     deep grass forest mount desert ice  urban suburb shallow highl tundra wetl  rainf
+BARRIER = np.array([  6.0, 1.0,  1.5,   9.0,  4.0,  5.0,  1.0,  1.0,  6.0,    2.5,  1.6,   3.5,  2.2], dtype=np.float32)
+BARRIER_WATER = 1.5        # a tile on a river, lake or the coast costs this much more to cross (rivers make borders)
+BARRIER_NOISE = 0.6        # and the ground's cost wobbles by up to exp(+-1.5 x this) over a large scale ...
+BARRIER_FINE = 1.1         # ... and exp(+-this) tile to tile: ragged borders, never straight lines or arcs
+
+
+def _ground_cost(world, win):
+    """Cost of crossing each tile of window `win` when drawing a border: mountains, deserts, marsh and water are hard
+    going, so the land falls apart along them - and some noise, so a border is never a straight line or an arc."""
+    from civilization import jag
+    from front import line_terrain
+    T = np.clip(world.T[win], 0, len(BARRIER) - 1)
+    cost = BARRIER[T]
+    wet = line_terrain(world)[win] - 1.0 - 0.9 * (1.0 - world.statics.move.reshape(world.H.shape)[win])
+    cost = cost + BARRIER_WATER * (wet > 0.15)
+    fine = getattr(world, "_border_fine", None)
+    if fine is None or fine.shape != world.H.shape:                 # (fine wiggles, fixed for the map)
+        seed = int(getattr(world, "seed", 0) or 0) if getattr(world, "stochastic", False) else 0
+        f = np.random.default_rng(seed + 99).random(world.H.shape).astype(np.float32)
+        for _ in range(2):
+            f = (f + np.roll(f, 1, 0) + np.roll(f, -1, 0) + np.roll(f, 1, 1) + np.roll(f, -1, 1)) / 5.0
+        fine = world._border_fine = np.clip((f - f.mean()) / (2.5 * f.std() + 1e-9), -1.0, 1.0)
+    return cost * np.exp(BARRIER_NOISE * jag(world, win) + BARRIER_FINE * fine[win])
+
+
+def split_by_ground(world, part, seeds):
+    """Share out the tiles of `part` (mask) between `seeds` [(r, c), ...]: each tile goes to the seed it is cheapest to
+    reach over the ground (_ground_cost) - so regions meet along mountains, deserts and rivers, in ragged lines.
+    Returns an int array, -1 outside `part`."""
+    out = np.full(part.shape, -1, dtype=np.int32)
+    rr, cc = np.nonzero(part)
+    if rr.size == 0 or not seeds:
+        return out
+    r0, r1, c0, c1 = rr.min(), rr.max() + 1, cc.min(), cc.max() + 1
+    win = (slice(r0, r1), slice(c0, c1))
+    inside = part[win]
+    cost = np.where(inside, _ground_cost(world, win), np.inf).astype(np.float64)
+    dist = np.full(inside.shape, np.inf)
+    lab = np.full(inside.shape, -1, dtype=np.int32)
+    for i, (r, c) in enumerate(seeds):
+        if r0 <= r < r1 and c0 <= c < c1 and inside[r - r0, c - c0]:
+            dist[r - r0, c - c0], lab[r - r0, c - c0] = 0.0, i
+    R, C = inside.shape
+    for _ in range(4 * (R + C)):                        # relax until nothing improves (in place: converges fast)
+        changed = False
+        for dr, dc in ((0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            ts = (slice(max(dr, 0), R + min(dr, 0)), slice(max(dc, 0), C + min(dc, 0)))
+            fs = (slice(max(-dr, 0), R + min(-dr, 0)), slice(max(-dc, 0), C + min(-dc, 0)))
+            step = 1.4142 if dr and dc else 1.0
+            cand = dist[fs] + 0.5 * (cost[fs] + cost[ts]) * step
+            better = cand < dist[ts] - 1e-9
+            if better.any():
+                dist[ts][better] = cand[better]
+                lab[ts][better] = lab[fs][better]
+                changed = True
+        if not changed:
+            break
+    lost = inside & (lab < 0)                           # (islands nothing reaches over land: the nearest seed)
+    if lost.any():
+        lr, lc = np.nonzero(lost)
+        d = np.stack([(lr + r0 - r) ** 2 + (lc + c0 - c) ** 2 for r, c in seeds])
+        lab[lr, lc] = d.argmin(axis=0)
+    out[win] = np.where(inside, lab, -1)
+    return out
+
+
+def _centers(world, part):
+    """The main cities of `part` a breaking country splits around: the densest places, at least REGION_SPACING apart
+    and at least REGION_CITY of the biggest (at most REGION_MAX)."""
+    cols = world.H.shape[1]
+    dens = np.where(part, box_sum(np.maximum(world.H, 0), 3), -1).astype(np.float64)
+    top = dens.max()
+    centers = []
+    while len(centers) < REGION_MAX:
+        idx = int(np.argmax(dens))
+        r, c = divmod(idx, cols)
+        if dens[r, c] <= 0 or dens[r, c] < REGION_CITY * top:
+            break
+        centers.append((r, c))
+        dens[max(0, r - REGION_SPACING):r + REGION_SPACING + 1, max(0, c - REGION_SPACING):c + REGION_SPACING + 1] = -1
+    return centers
+
+
 def _regions(world, mask):
     """Split `mask` into regions: connected pieces (by land or coastal sea), big pieces around their main cities."""
     net = _network(world, mask)
     lab, n = label(net)
     lab = np.where(mask, lab, 0)
-    H = np.maximum(world.H, 0)
-    rows, cols = H.shape
-    rr, cc = np.indices(H.shape)
     out = []
     for k in range(1, n + 1):
         part = lab == k
@@ -245,21 +332,11 @@ def _regions(world, mask):
         if tiles <= REGION_SPACING ** 2:
             out.append(part)
             continue
-        dens = np.where(part, box_sum(H, 3), -1).astype(np.float64)
-        top = dens.max()
-        centers = []
-        while len(centers) < REGION_MAX:
-            idx = int(np.argmax(dens))
-            r, c = divmod(idx, cols)
-            if dens[r, c] <= 0 or dens[r, c] < REGION_CITY * top:
-                break
-            centers.append((r, c))
-            dens[max(0, r - REGION_SPACING):r + REGION_SPACING + 1, max(0, c - REGION_SPACING):c + REGION_SPACING + 1] = -1
+        centers = _centers(world, part)
         if len(centers) <= 1:
             out.append(part)
             continue
-        d = np.stack([(rr - r) ** 2 + (cc - c) ** 2 for r, c in centers])
-        near = d.argmin(axis=0)
+        near = split_by_ground(world, part, centers)    # (along mountains, deserts and rivers - not straight lines)
         for i in range(len(centers)):
             sub = part & (near == i)
             if sub.any():
@@ -494,6 +571,11 @@ def retreat(world, civ):
     return moved
 
 
+def sim_home_reach():
+    import sim
+    return sim.HOME_REACH
+
+
 def overextension(world):
     """A country that has grown fast - retaking a lot of land, or land that was never its own - may not hold together:
     the newly held provinces (or, failing that, the half furthest from the capital) break away as a state of their own.
@@ -506,7 +588,8 @@ def overextension(world):
             continue
         n = int(civ.m.get("n", 0))
         hist = list(getattr(civ, "long_hist", ()))
-        if n < OVEREXTEND_MIN or len(hist) < 10 or world.ticks - getattr(civ, "_overext", -10 ** 6) < OVEREXTEND_COOLDOWN:
+        if n < OVEREXTEND_MIN or len(hist) < 10:
+            civ._abroad_ok = True
             continue
         win = world.bbox(civ.id, 0)
         mine = (world.O[win] == civ.id) & (world.H[win] > 10)
@@ -532,7 +615,25 @@ def overextension(world):
                 dc = np.minimum(dc, world.cols - dc)
             res = float(world.meta.get("res", 0.5))
             sprawl = float(np.percentile(np.hypot(rr + win[0].start - civ.capital[0], dc), 90)) * res
-        instab = (1.5 * max(0.0, gain - OVEREXTEND_GAIN) + 2.5 * max(0.0, f_share - OVEREXTEND_FOREIGN)
+        # an overextended country takes no more of other countries' land (sim.may_claim) - a state founded later
+        # (settlers, survivors: no country of its own to compare with) once it is as big as a merger may make one
+        civ._abroad_ok = (grown <= ABROAD_GROWN and f_share <= ABROAD_FOREIGN if own0_pop >= 50
+                          else n <= OVEREXTEND_NEW_MAX)
+        if world.ticks - getattr(civ, "_overext", -10 ** 6) < OVEREXTEND_COOLDOWN:
+            continue
+        # (land far from the capital - past the reach it can claim at home: it has grown up to that edge)
+        #  (a country's own land from the start doesn't count: Russia is big, not overstretched)
+        mr, mc = np.nonzero(mine)
+        dcap = np.abs(mc + win[1].start - civ.capital[1])
+        if world.wrap:
+            dcap = np.minimum(dcap, world.cols - dcap)
+        res_ = float(world.meta.get("res", 0.5))
+        far_ = (np.hypot(mr + win[0].start - civ.capital[0], dcap) * res_ > 0.8 * sim_home_reach()) & (o0[mr, mc] != civ.id)
+        beyond = float(far_.mean()) if far_.size else 0.0
+        instab_far = OVEREXTEND_FAR_W * max(0.0, beyond - OVEREXTEND_FAR)
+        instab = (1.5 * max(0.0, gain - OVEREXTEND_GAIN) * min(1.0, f_share / 0.3)      # (regrowing at home is fine)
+                  + instab_far
+                  + 2.5 * max(0.0, f_share - OVEREXTEND_FOREIGN)
                   + OVEREXTEND_CONQUEST_W * min(2.0, max(0.0, conquest - OVEREXTEND_CONQUEST))
                   + OVEREXTEND_GROWN_W * min(2.0, max(0.0, grown - OVEREXTEND_GROWN))
                   + OVEREXTEND_SPRAWL_W * min(2.0, max(0.0, sprawl / OVEREXTEND_SPRAWL - 1.0)))
@@ -559,14 +660,25 @@ def overextension(world):
             part[win] = full[win] & (o0 != civ.id) & (o0 != civ.root)
             why = "it never belonged to them, and the government can't hold it"
         else:
-            rr, cc = np.nonzero(full)
-            dc = np.abs(cc - civ.capital[1])
-            if world.wrap:
-                dc = np.minimum(dc, world.cols - dc)
-            d = np.hypot(rr - civ.capital[0], dc)
-            far = d > np.percentile(d, 55)
-            part = np.zeros(world.H.shape, dtype=bool)
-            part[rr[far], cc[far]] = True
+            # the far side: the country shared out between its capital and its other big cities along the lie of the
+            # land (split_by_ground); the region of a big city far from the capital breaks away
+            seeds = [tuple(civ.capital)] + [x for x in _centers(world, full) if
+                                            abs(x[0] - civ.capital[0]) + abs(x[1] - civ.capital[1]) > REGION_SPACING]
+            if len(seeds) < 2:
+                continue
+            share = split_by_ground(world, full, seeds)
+            best, part = -1.0, None
+            for i in range(1, len(seeds)):
+                sub = share == i
+                size = int(sub.sum())
+                dc = abs(seeds[i][1] - civ.capital[1])
+                if world.wrap:
+                    dc = min(dc, world.cols - dc)
+                far_ = np.hypot(seeds[i][0] - civ.capital[0], dc) * np.sqrt(size)
+                if size and far_ > best:
+                    best, part = far_, sub
+            if part is None:
+                continue
             why = "the realm has grown too big to govern from one capital"
         lab, k = label(part)
         if k == 0:
@@ -583,7 +695,7 @@ def overextension(world):
             continue
         new = _new_state(world, civ, region, why=why)
         if new is not None:
-            war.maybe_civil_war(world, civ, new, "it won't let the provinces go")
+            war.maybe_civil_war(world, civ, new, "it won't let the provinces go", chance=OVEREXTEND_WAR)
 
 
 def independence(world):
@@ -618,4 +730,5 @@ def independence(world):
                 new = _new_state(world, civ, region, why="the overseas territory declares independence")
                 if new is not None:
                     import war
-                    war.maybe_civil_war(world, civ, new, "it won't give up its overseas territory")
+                    war.maybe_civil_war(world, civ, new, "it won't give up its overseas territory",
+                                        chance=OVEREXTEND_WAR)

@@ -11,13 +11,18 @@ def render_rgb(world, mode):
     h = np.clip(world.H, 0, 255)
     z = np.clip(world.Z, 0, 255)
     horde = None
-    if mode in (1, 4):
+    if mode in (1, 4, 5):
         z = _steady_zombies(world, z)
         horde = _horde_shade(world, z)
 
     img = _base(world, mode, h, z, horde)
+    if mode in (1, 4, 5) and getattr(world, "crossings", None):          # hordes swimming across to the next landmass
+        import crossings
+        top = getattr(world, "_hshow", (0, np.log1p(HORDE_MIN_TOP)))[1]
+        for (r, c), n in crossings.at_sea(world).items():
+            img[r, c] = HORDE_RAMP[int(np.clip(np.log1p(n) * 255.0 / top, 60, 255))]
     fall = getattr(world, "fallout", None)
-    if fall is not None and mode in (1, 4) and fall.any():           # nuclear fallout: sickly green
+    if fall is not None and mode in (1, 4, 5) and fall.any():           # nuclear fallout: sickly green
         hot = fall > 0
         img[hot] = (img[hot] * 0.4 + np.array([150, 255, 60]) * 0.6).astype(np.uint8)
     for c in world.civs:
@@ -64,6 +69,8 @@ HORDE_MIX = 0.6             # share of the 3x3 neighbourhood in a tile's horde s
 HORDE_TOP = 98              # percentile of the map's zombie tiles drawn at full brightness
 HORDE_MIN_TOP = 12.0        # (but never brighter than this many zombies on a tile deserve)
 HORDE_REF_FADE = 0.97       # the brightness scale follows the outbreak slowly (no flicker as the numbers move)
+HORDE_TREND_FADE = 0.8      # the recent average a tile is compared with (per day) ...
+HORDE_FRONT = 90            # ... and how much brighter a horde shows where it is arriving
 
 
 def _horde_shade(world, z):
@@ -80,13 +87,22 @@ def _horde_shade(world, z):
     near = (p[:-2, :-2] + p[:-2, 1:-1] + p[:-2, 2:] + p[1:-1, :-2] + p[1:-1, 2:]
             + p[2:, :-2] + p[2:, 1:-1] + p[2:, 2:] + zf) / 9.0
     v = np.log1p((1.0 - HORDE_MIX) * zf + HORDE_MIX * near)
+    # a horde on the move: where it is arriving (more than its recent average) it shows brighter - the front of a
+    # marching horde glows, so you can see which way it is going
+    ema = getattr(world, "_hema", None)
+    if ema is None or ema.shape != zf.shape or memo is None or t < memo[0]:
+        ema = near.copy()
+    else:
+        ema = ema + (1.0 - HORDE_TREND_FADE ** max(1, t - memo[0])) * (near - ema)
+    world._hema = ema
+    arriving = np.clip((near - ema) / (ema + 4.0), 0.0, 1.0)
     world._hnear = (t, near)
     some = zf > 0
     top = float(np.percentile(v[some], HORDE_TOP)) if some.sum() > 20 else 0.0
     top = max(top, float(np.log1p(HORDE_MIN_TOP)))
     if memo is not None and memo[2].shape == z.shape and 0 < t - memo[0] < 30:
         top = max(top, memo[1] * HORDE_REF_FADE ** (t - memo[0]))      # (falls slowly, rises at once)
-    out = np.clip(v * (255.0 / top), 0, 255).astype(np.uint8)
+    out = np.clip(v * (255.0 / top) + HORDE_FRONT * arriving * (zf > 0), 0, 255).astype(np.uint8)
     world._hshow = (t, top, out)
     return out
 
@@ -256,9 +272,32 @@ def _touch(mask):
     return out
 
 
+HORDE_OVER_TERRAIN = (0.15, 1.0)    # (view 5: how strongly thin and dense zombie ground covers the terrain)
+
+
+def _hordes_on_terrain(world, z, horde):
+    """View 5: the land as it is - terrain - with the zombies on it in the horde colours (thin ones faint, dense ones
+    solid); no people.  (Garrisons are drawn on top in every view.)"""
+    img = np.zeros(z.shape + (3,), dtype=np.uint8)
+    img[:] = (0, 0, 255)
+    known = (world.T >= 0) & (world.T < len(mapio.TERRAIN))
+    img[known] = mapio.terrain_to_rgb(world.T)[known]
+    img = (img.astype(np.float32) * 0.75).astype(np.uint8)        # (a little dimmed, so the hordes stand out)
+    if horde is None:
+        horde = _horde_shade(world, z)
+    some = z > 0
+    if some.any():
+        a0, a1 = HORDE_OVER_TERRAIN
+        alpha = (a0 + (a1 - a0) * horde[some].astype(np.float32) / 255.0)[:, None]
+        img[some] = (img[some] * (1.0 - alpha) + HORDE_RAMP[horde[some]] * alpha).astype(np.uint8)
+    return img
+
+
 def _base(world, mode, h, z, horde=None):
     if mode == 4:
         return _ownership(world, h, z, horde)
+    if mode == 5:
+        return _hordes_on_terrain(world, z, horde)
     if mode == 2:                                    # terrain
         img = np.zeros(h.shape + (3,), dtype=np.uint8)
         img[:] = (0, 0, 255)

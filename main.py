@@ -18,8 +18,10 @@ parser.add_argument("--no-nukes", action="store_true", help="nobody uses nuclear
 parser.add_argument("--no-civil-war", action="store_true", help="regions that break away are let go peacefully")
 parser.add_argument("--outbreak", default=None, metavar="CITY",
                     help="start the outbreak in this city instead (e.g. \"New York\", Berlin, Lagos)")
-parser.add_argument("--virulence", type=float, default=1.4,
+parser.add_argument("--virulence", type=float, default=1.5,
                     help="how fast zombies bite (1.25 = it usually stays in Asia, 1.75 = the world falls)")
+parser.add_argument("--coordination", type=float, default=0.8,
+                    help="how organized the hordes are, 0..1 (0 = they just spread out, 1 = they move like an army)")
 args = parser.parse_args()
 MAP_FOLDER = args.map
 PANEL = 520
@@ -59,6 +61,12 @@ def start_outbreak(w, city):
     if not match:
         raise SystemExit(f"no city called {city!r} on this map")
     name, r, c, _ = max(match, key=lambda c: c[3])
+    if w.D[r, c] >= 7:                           # (not on the fortress itself: in the streets just outside it)
+        near = [(abs(dr) + abs(dc), r + dr, c + dc) for dr in range(-3, 4) for dc in range(-3, 4)
+                if 0 <= r + dr < w.rows and 0 <= c + dc + 1 < w.cols and w.land[r + dr, c + dc]
+                and w.D[r + dr, c + dc] < 7 and w.D[r + dr, c + dc + 1] < 7 and w.H[r + dr, c + dc] > 10]
+        if near:
+            _, r, c = min(near)
     w.Z[:] = 0
     w.Z[r, c] = 40
     w.Z[r, (c + 1) % w.cols] = 25
@@ -75,6 +83,7 @@ def new_world():
     w.nukes_allowed = not args.no_nukes
     w.civil_wars = not args.no_civil_war
     w.virulence = args.virulence
+    w.coordination = max(0.0, min(1.0, args.coordination))
     if args.outbreak:
         start_outbreak(w, args.outbreak)
     if args.war and len(w.civs) > 2:
@@ -298,6 +307,8 @@ while not done:
                 mode = 4
             elif event.key == pygame.K_4:
                 mode = 3
+            elif event.key == pygame.K_5:
+                mode = 5
             elif event.key in (pygame.K_F11, pygame.K_f):
                 toggle_fullscreen()
             elif event.key == pygame.K_ESCAPE and fullscreen:

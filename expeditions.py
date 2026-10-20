@@ -50,7 +50,7 @@ OPEN_RADIUS = 15.0           # degrees: a region is "open" when ...
 OPEN_SHARE = 0.55            # ... at least this share of the once-settled land within OPEN_RADIUS is empty and nobody's
 OPEN_REACH = 110.0           # degrees of voyage an able country will sail for open land (another continent)
 OPEN_AWAY = 20.0             # open land on its own landmass counts as overseas this far from its capital
-OPEN_MAX = 4                 # landings at once while there is open land somewhere
+OPEN_MAX = 2                 # landings at once while there is open land somewhere
 OPEN_GAP = 30
 OPEN_BEACH = 30.0            # degrees around such a landing it may take
 
@@ -72,7 +72,7 @@ def able(world, c):
     danger = EXP_DANGER + (EXP_DANGER_TURNED if getattr(c, "turned", False) else 0.0)
     return (c.military >= EXP_ARMY and c.strength >= EXP_STRENGTH and c.size(world) >= EXP_SIZE
             and c.materials >= EXP_MATERIALS and c.ports > 0 and c.threat(c.m) < danger
-            and c.m.get("damage", 0.0) < 0.5
+            and c.m.get("damage", 0.0) < 0.5 and getattr(c, "_abroad_ok", True)
             and not war.at_war(world, c.id)
             and sum(1 for b in c.bases if b.get("overseas")) < (OPEN_MAX if any_open(world) else EXP_MAX)
             and world.ticks >= getattr(c, "_exp_next", 0))
@@ -245,5 +245,7 @@ def beachhead(world, civ, r, c, reach=BEACH_REACH):
     if bm is None:
         bm = world.beach_map = np.zeros(world.H.shape, dtype=np.int32)
     rr, cc = np.indices(world.H.shape)
-    near = (_deg(world, r, c, rr, cc) <= reach) & (world.statics.landmass == world.statics.landmass[r, c])
+    from civilization import jag
+    ragged = reach * (1.0 + 0.35 * jag(world) / 1.5)                  # (a ragged edge, not a circle)
+    near = (_deg(world, r, c, rr, cc) <= ragged) & (world.statics.landmass == world.statics.landmass[r, c])
     bm[near & (bm == 0)] = civ.id

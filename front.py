@@ -41,8 +41,9 @@ ALERT_RATE = 0.016         # mobilization: a government that sees zombies in its
 ALERT_FADE = 0.002          # ~1/ALERT_RATE ticks (an outbreak catches everyone unprepared), and stands it down slowly
 ALERT_ZOMBIES = 100
 ALARM_ALERT = 0.3           # alert every government keeps once the world is fully alarmed
-LINE_TILES = 40             # front tiles an average-sized government can man at full strength
+LINE_TILES = 60             # front tiles an average-sized government can man at full strength
 RESOLVE_LINE = 1.6          # a government that has adapted to the fight (resolve.py) holds its line this much better
+SURPRISE_LINE = 0.3         # the line's strength where a horde has just come ashore (crossings.SURPRISE_DAYS)
 LINE_CAP = 2.2              # (line strength beyond 1: a hardened line on good ground)
 TERRAIN_LINE = 0.9          # a line on rough ground holds better: x (1 + TERRAIN_LINE x (1 - terrain.MOVE)) ...
 WATER_LINE = 0.3            # ... and + this behind a river, lake or the coast
@@ -121,6 +122,10 @@ def _window(world, strength, win, wrap):
     from engine import pad1, nb
     H, Z, O = world.H[win], world.Z[win], world.O[win]       # Z is a view: kills go straight into the map
     S = np.minimum(strength[O] * line_terrain(world)[win], LINE_CAP)    # (rough ground and rivers help the line)
+    import crossings
+    hidden = crossings.surprise(world)                     # (a fresh landing: the line there isn't ready yet)
+    if hidden is not None:
+        S = np.where(hidden[win], S * SURPRISE_LINE, S)
     manned = (S > 0) & (H > 10)
     for c in world.civs:                                   # districts being given up aren't manned
         rm = getattr(c, "retreat_mask", None)

@@ -12,8 +12,8 @@ onto the tile grid:
      region), with villages and hamlets dotted about.
 
 A map module gives the lists - see make_middleearth.py and make_beleriand.py:
-  ground   COAST, ISLANDS, WATER (lakes, bays), OPEN_RIVERS, RIVERS, MOUNTAINS ([points], width[, "hills"]), PEAKS,
-           HILLS, FORESTS, WOODLAND, DOWNS, MARSHES, DESERTS, COLD ([(shape, terrain, share)]), NORTH (tundra, ice
+  ground   COAST (or land_mask(canvas): a land grid, e.g. traced from a picture - make_discworld.py), ISLANDS, WATER (lakes, bays), OPEN_RIVERS, RIVERS, MOUNTAINS ([points], width[, "hills"]), PEAKS,
+           HILLS, FORESTS, RAINFOREST, WOODLAND, DOWNS, MARSHES, DESERTS, COLD ([(shape, terrain, share)]), NORTH (tundra, ice
            lines), AMP (how far outlines are pushed about), RIVER_WIDTH, FEN_WIDTH
   realms   REALMS (name, side = alliance or None, land, extra, rural, floor, army, gov, traits[, margin, spill,
            liege, reach - a town or fief grows from its towns inside its overlord's land, up to `reach`]),
@@ -113,7 +113,10 @@ def paint_terrain(cv, G, seed=7):
     rng = np.random.default_rng(seed)
     noise = fbm(rng, R, C, cells=(8, 16, 32, 64))
     noise2 = fbm(rng, R, C, cells=(12, 24, 48, 96))
-    land = cv.ragged(cv.poly(G.COAST), 9 * A, salt=1, roughness=0.25)
+    if hasattr(G, "land_mask"):                  # (a map traced from a picture: its own land, coasts as drawn)
+        land = G.land_mask(cv)
+    else:
+        land = cv.ragged(cv.poly(G.COAST), 9 * A, salt=1, roughness=0.25)
     for i, pts in enumerate(getattr(G, "ISLANDS", [])):
         land |= cv.ragged(cv.poly(pts), 3 * A, salt=300 + i, roughness=0.2)
     lakes = np.zeros((R, C), dtype=bool)
@@ -130,11 +133,16 @@ def paint_terrain(cv, G, seed=7):
     for i, (s_, ter, share) in enumerate(getattr(G, "COLD", [])):
         m = cv.ragged(cv.shape(s_), 10 * A, salt=330 + i)
         T[land & m & ((noise2 < share) if share < 1 else True)] = ter
+    if hasattr(G, "paint_ground"):               # (anything a map paints itself: the Disc's cold round the Hub)
+        G.paint_ground(cv, T, land, noise, noise2)
     for i, (pts, share) in enumerate(G.DESERTS.values()):
         T[land & cv.ragged(cv.poly(pts), 18 * A, salt=20 + i) & (noise2 < share) & (T != ICE)] = DESERT
     for i, (s_, share) in enumerate(G.FORESTS.values()):
         m = cv.ragged(cv.shape(s_), 14 * A, salt=40 + i)
         T[land & m & ((noise < share) if share < 1 else True) & (T != DESERT) & (T != ICE)] = FOREST
+    for i, (s_, share) in enumerate(getattr(G, "RAINFOREST", {}).values()):     # (jungle)
+        m = cv.ragged(cv.shape(s_), 14 * A, salt=260 + i)
+        T[land & m & ((noise < share) if share < 1 else True) & (T != DESERT) & (T != ICE)] = TR.RAINFOREST
     fine = fbm(np.random.default_rng(seed + 1), R, C, cells=(24, 48, 96, 192))
     fine2 = fbm(np.random.default_rng(seed + 2), R, C, cells=(20, 40, 80, 160))
     for i, (pts, share) in enumerate(G.WOODLAND.values()):

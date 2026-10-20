@@ -9,6 +9,11 @@ People on land nobody governs (no organized defense) smell strongest; people on 
 zone in front of it.  Standing fortifications (defense 7) give off no scent.  Rough ground carries the scent badly (mountains hardly at
 all: terrain.MOVE), so hordes follow passes and valleys round a range rather than over it - and hunting zombies move
 into rough ground more slowly too.  Zombies are conserved.
+
+Hordes far from anyone (no prey within HUNT_REACH) still track people from much farther away (FAR_REACH tiles): a
+coarse scent over the land (cells of FAR_CELL x FAR_CELL tiles, recomputed every FAR_EVERY days) gives each cell the
+direction of the nearest reachable people, and hordes of at least FAR_MIN_Z drift that way - so a horde that has
+eaten a coast bare heads inland for the next town instead of milling about until it starves.
 """
 import numpy as np
 
@@ -20,14 +25,21 @@ SCENT_FADE = 0.82         # ... losing this share per step
 SCENT_EVERY = 3           # ticks between recomputing the scent (it changes slowly)
 HUNT_MIN_Z = 1            # even stragglers wander toward people (they end up at the border, not in a dead zone)
 GOVERNED_SCENT = 0.4      # people on governed land smell this much compared with people on land nobody holds
-HUNT_SHARE = 12           # a hunting tile sends 1/HUNT_SHARE of its zombies per tick
-HUNT_CHANCE = 0.25
+HUNT_SHARE = 6            # a hunting tile sends 1/HUNT_SHARE of its zombies per tick
+HUNT_CHANCE = 0.5
 HUNT_UPHILL = 1.02        # only toward a neighbour whose scent is this much stronger
 CLOSE_REACH = 6           # within this many steps of people the horde closes in hard (it can see / hear them):
 CLOSE_CHANCE = 0.9        # ... nearly every tile moves every tick ...
 CLOSE_SHARE = 4           # ... a quarter of its zombies at a time - more than spreading out again undoes, so zombies
                           #     mass at the border and press against it instead of thinning out in front of it
 UNDEFENDED = 5            # defense below this on ungoverned land counts as undefended
+FAR_REACH = 200           # tiles: how far hordes track people when nothing is close (coarse scent) ...
+FAR_CELL = 6              # ... over cells of this many tiles square
+FAR_EVERY = 10            # ticks between recomputing it
+FAR_FADE = 0.88           # per cell step (x the cell's walkability)
+FAR_MIN_Z = 15            # only hordes this big set off after a distant scent
+FAR_CHANCE = 0.8          # per tick, such a horde tile sends ...
+FAR_SHARE = 2             # ... 1/FAR_SHARE of its zombies a step that way: the horde moves as a body
 
 
 def _max8(a, wrap):
@@ -72,12 +84,135 @@ def scent(world, win, wrap, key=0):
     return s, close
 
 
+_TURN = {i: [j for j, d in enumerate(DIRECTIONS)
+              if 0 < abs(d[0] - DIRECTIONS[i][0]) + abs(d[1] - DIRECTIONS[i][1]) <= 1] for i in range(8)}
+
+
+def step_toward(world, rr, cc, way):
+    """The tile one step from each (rr, cc) in direction `way` (index into DIRECTIONS) - or, where that is water or a
+    fortress wall, a step either side of it (round a bay, along a coast, past a fort).  Returns (tr, tc, ok)."""
+    dirs = np.array(DIRECTIONS)
+    rows, cols = world.Z.shape
+    way = np.asarray(way, dtype=np.int64)
+    tr, tc = rr + dirs[way, 0], cc + dirs[way, 1]
+    if world.wrap:
+        tc = tc % cols
+    bad = np.ones(rr.size, dtype=bool)
+    for attempt in range(3):
+        inside = (tr >= 0) & (tr < rows) & (tc >= 0) & (tc < cols)
+        trc, tcc = np.clip(tr, 0, rows - 1), np.clip(tc, 0, cols - 1)
+        bad = ~inside | ~world.land[trc, tcc] | (world.D[trc, tcc] >= 7)
+        if not bad.any() or attempt == 2:
+            break
+        alt = np.array([_TURN[int(x)][attempt % 2] for x in way[bad]], dtype=np.int64)
+        tr[bad], tc[bad] = rr[bad] + dirs[alt, 0], cc[bad] + dirs[alt, 1]
+        if world.wrap:
+            tc[bad] %= cols
+    return tr, tc, ~bad
+
+
+def transport(world, rr, cc, tr, tc, amount):
+    """Move `amount` zombies from each (rr, cc) to (tr, tc) at once.  A tile holds at most 255, but room counts the
+    zombies leaving it in the same move - so a dense horde moves as a body instead of jamming (front and back move
+    together).  Returns how many moved."""
+    Z = world.Z
+    if rr.size == 0:
+        return 0
+    flat = Z.reshape(-1)
+    cols = Z.shape[1]
+    src = rr * cols + cc
+    dst = tr * cols + tc
+    amount = np.minimum(np.maximum(amount, 0), flat[src]).astype(np.float64)
+    out = np.bincount(src, weights=amount, minlength=flat.size)
+    inflow = np.bincount(dst, weights=amount, minlength=flat.size)
+    room = 255.0 - (flat - out)
+    scale = np.where(inflow > 0, np.clip(room / np.maximum(inflow, 1e-9), 0.0, 1.0), 1.0)
+    moved = np.floor(amount * scale[dst]).astype(Z.dtype)
+    np.subtract.at(flat, src, moved)
+    np.add.at(flat, dst, moved)
+    return int(moved.sum())
+
+
 def hunt(world):
     from engine import active_windows
     total = 0
     for k, (win, wrap) in enumerate(active_windows(world, world.Z > 0, HUNT_REACH + 2)):
         total += _hunt(world, win, wrap, k)
-    return total
+    import hordes
+    return total + hordes.step(world) + far_hunt(world)
+
+
+def far_scent(world):
+    """(direction, far) per coarse cell: the index into DIRECTIONS of the neighbouring cell with the strongest distant
+    scent (-1: none), and whether the cell is far from all people (nothing within ~HUNT_REACH tiles)."""
+    memo = getattr(world, "_far_scent", None)
+    if memo is not None and world.ticks - memo[0] < FAR_EVERY:
+        return memo[1], memo[2]
+    k = FAR_CELL
+    rows, cols = world.H.shape
+    R, C = -(-rows // k), -(-cols // k)
+    pad = ((0, R * k - rows), (0, C * k - cols))
+    walk = world.land & (world.D < 7)
+    prey = np.pad(np.where(walk, np.maximum(world.H, 0), 0).astype(np.float32), pad)
+    landc = np.pad(walk.astype(np.float32), pad).reshape(R, k, C, k).mean(axis=(1, 3))
+    move = np.pad(np.where(walk, world.statics.move.reshape(world.H.shape), 0).astype(np.float32), pad)
+    movec = move.reshape(R, k, C, k).mean(axis=(1, 3)) / np.maximum(landc, 1e-6)
+    P = prey.reshape(R, k, C, k).sum(axis=(1, 3))
+    fade = (FAR_FADE * np.sqrt(np.clip(movec, 0, 1)) * (landc >= 0.4)).astype(np.float32)
+    wrap = bool(world.wrap)
+    s = P.copy()
+    near = P > 0
+    steps = max(1, FAR_REACH // k)
+    for i in range(steps):
+        s = _max8(s, wrap) * fade
+        np.maximum(s, P, out=s)
+        if i + 1 == max(1, HUNT_REACH // k):
+            near = s > 0
+    padded = np.full((R + 2, C + 2), -1.0, dtype=np.float32)
+    padded[1:-1, 1:-1] = s
+    if wrap:
+        padded[1:-1, 0], padded[1:-1, -1] = s[:, -1], s[:, 0]
+    vals = np.stack([padded[1 + dr:R + 1 + dr, 1 + dc:C + 1 + dc] * (1.0 + 1e-4 * (dr == 0 or dc == 0))
+                     for dr, dc in DIRECTIONS])               # (a tie goes to the straight step, not a diagonal drift)
+    best = vals.argmax(axis=0)
+    way = np.where(vals.max(axis=0) > s * HUNT_UPHILL, best, -1).astype(np.int8)
+    world._far_scent = (world.ticks, way, ~near)
+    return way, ~near
+
+
+def far_hunt(world):
+    """Hordes with nobody near track the distant scent (see far_scent): a step toward the next cell that smells
+    stronger."""
+    Z = world.Z
+    rr, cc = np.nonzero(Z >= FAR_MIN_Z)
+    if rr.size == 0:
+        return 0
+    way, far = far_scent(world)
+    gr, gc = rr // FAR_CELL, cc // FAR_CELL
+    w = way[gr, gc]
+    sel = far[gr, gc] & (w >= 0)
+    if world.stochastic:
+        sel &= world.rng.random(rr.size) < FAR_CHANCE
+    rr, cc, w = rr[sel], cc[sel], w[sel]
+    if rr.size == 0:
+        return 0
+    plan_ = getattr(world, "_horde_plan", None)          # (a horde on the march is moved by hordes.py)
+    if plan_ is not None:
+        k = plan_["k"]
+        a = plan_["dirs"]
+        mine = a[np.minimum(rr // k, a.shape[0] - 1), np.minimum(cc // k, a.shape[1] - 1)] >= 0
+        rr, cc, w = rr[~mine], cc[~mine], w[~mine]
+        if rr.size == 0:
+            return 0
+    tr, tc, ok = step_toward(world, rr, cc, w)
+    rr, cc, tr, tc = rr[ok], cc[ok], tr[ok], tc[ok]
+    if rr.size == 0:
+        return 0
+    mv = world.statics.move.reshape(world.H.shape)
+    frac = world.rng.random(rr.size) if world.stochastic else np.full(rr.size, 0.5)
+    a = np.floor(Z[rr, cc] // FAR_SHARE * mv[tr, tc] + frac).astype(np.int64)
+    moved = transport(world, rr, cc, tr, tc, a)
+    return moved
 
 
 def _hunt(world, win, wrap, key):
@@ -104,24 +239,16 @@ def _hunt(world, win, wrap, key):
         return 0
     share = np.where(cl, CLOSE_SHARE, HUNT_SHARE)
     amount = np.minimum(np.maximum(Z[rr, cc] // share, 1), Z[rr, cc])
-    way = best
     mv = world.statics.move.reshape(world.H.shape)[win]
     frac = world.rng.random(rr.size) if world.stochastic else np.full(rr.size, 0.5)
     rows, cols = Z.shape
-    moved_total = 0
-    for i, (dr, dc) in enumerate(DIRECTIONS):
-        k = np.flatnonzero(way == i)
-        if k.size == 0:
-            continue
-        sr, sc = rr[k], cc[k]
-        tr, tc = sr + dr, sc + dc
-        if wrap:
-            tc %= cols
-        inside = (tr >= 0) & (tr < rows) & (tc >= 0) & (tc < cols)
-        sr, sc, tr, tc, a, f = sr[inside], sc[inside], tr[inside], tc[inside], amount[k][inside], frac[k][inside]
-        into = np.floor(a * mv[tr, tc] + f).astype(Z.dtype)        # rough ground slows them
-        moved = np.minimum(np.minimum(into, a), np.maximum(255 - Z[tr, tc], 0)).astype(Z.dtype)
-        Z[sr, sc] -= moved
-        np.add.at(Z, (tr, tc), moved)
-        moved_total += int(moved.sum())
+    dirs = np.array(DIRECTIONS)
+    tr, tc = rr + dirs[best, 0], cc + dirs[best, 1]
+    if wrap:
+        tc %= cols
+    inside = (tr >= 0) & (tr < rows) & (tc >= 0) & (tc < cols)
+    rr, cc, tr, tc, amount, frac = rr[inside], cc[inside], tr[inside], tc[inside], amount[inside], frac[inside]
+    into = np.minimum(np.floor(amount * mv[tr, tc] + frac), amount).astype(np.int64)      # rough ground slows them
+    r0, c0 = win[0].start or 0, win[1].start or 0
+    moved_total = transport(world, rr + r0, cc + c0, tr + r0, (tc + c0) % world.cols if wrap else tc + c0, into)
     return moved_total

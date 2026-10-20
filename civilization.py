@@ -31,6 +31,7 @@ ACTIVITIES = (QUARANTINE, RETREAT, FORTIFY, PURGE, EVACUATE, RECLAIM, OFFENSIVE)
 
 # --- morale ---------------------------------------------------------------------------
 ANARCHY_AT = 3             # morale below this: the civilization collapses ...
+COLONY_HELD = 0.3          # (a young settlers' colony: settlers.COLONY_GRACE)
 MORALE_HELD = 0.6          # ... but not while it still holds this share of its peak population: a government that
                            #     has most of its people doesn't dissolve over a bad month (it can still lose its capital)
 NEAR_RADIUS = 4            # "close" = within this many tiles (square box)
@@ -100,7 +101,8 @@ QUAR_FULL = 1000.0         # zombies outside the borders that make quarantine fu
 MIL_START = 0.15           # founding nations begin with a small standing army (0..1)
 MIL_MIN_POP = 150          # people needed before anyone can be drilled
 MIL_MIN_MATERIALS = 15     # equipment needed to keep training
-MIL_RATE = 0.006           # training per tick (scaled by population, up to 1500 people)
+MIL_RATE = 0.006           # training per tick (scaled by population, up to 1500 people) ...
+MIL_ALERT = 1.0            # ... x (1 + this x its alert, front.py): a country under attack mobilizes faster
 MIL_COST = 8.0             # materials per unit of training
 MIL_ATTRITION = 0.002      # a destitute army melts away this fast
 RECLAIM_READY = 0.3        # army strength needed to start a campaign
@@ -548,7 +550,10 @@ class Civilization:
                 if self._recover_acc >= 1.0:
                     self._recover_acc -= 1.0
                     self.morale += 1
-        if self.morale < ANARCHY_AT and m.get("pop", 0) >= MORALE_HELD * max(getattr(self, "peak_pop", 0.0), 1.0):
+        held = MORALE_HELD
+        if world.ticks < getattr(self, "colony_until", -1):
+            held = COLONY_HELD                           # (a young colony holds on as long as most of it is left)
+        if self.morale < ANARCHY_AT and m.get("pop", 0) >= held * max(getattr(self, "peak_pop", 0.0), 1.0):
             self.morale = ANARCHY_AT
         if self.morale < ANARCHY_AT:
             self.collapse(world)
@@ -728,7 +733,8 @@ class Civilization:
         d = self.danger(m)[0]
         rate = (MIL_RATE * min(1.0, m["pop"] / 1500.0) * (1.0 if d < 0.6 else 0.5) * world.jitter(0.3)
                 * govern.mod(self, "army") * (0.5 + self.strength)       # strong armies mobilize faster
-                * (1.0 + getattr(self, "resolve", 0.0)))                  # (and a country at war with them, faster)
+                * (1.0 + getattr(self, "resolve", 0.0))                   # (and a country at war with them, faster)
+                * (1.0 + MIL_ALERT * self.alert))                         # (a country on alert drafts in earnest)
         rate = min(rate, 1.0 - self.military)
         self.military += rate
         self.materials -= MIL_COST * rate
@@ -749,6 +755,10 @@ class Civilization:
         for k, reach in enumerate(sorted(RECLAIM_REACHES, reverse=True)):
             weight = np.where(dist <= reach + jg, k + 1.0, weight)                 # (round, ragged bands)
         weight = np.where(owned, len(RECLAIM_REACHES) + 2.0, weight)
+        import crossings
+        hidden = crossings.surprise(world)               # (a fresh landing: not found yet)
+        if hidden is not None:
+            weight = np.where(hidden[win], 0.0, weight)
         rr, cc = np.nonzero((weight > 0) & (Zw >= RECLAIM_MIN_Z))
         if rr.size == 0:
             return
@@ -895,7 +905,12 @@ class Civilization:
             return
         Z, H = world.Z.reshape(-1), world.H.reshape(-1)
         owned = (world.O == self.id) & (world.H > 10)
-        target = ((box_sum(owned, REGION_REACH) > 0) & (world.Z >= PURGE_MIN_ZOMBIES)).reshape(-1)
+        target = (box_sum(owned, REGION_REACH) > 0) & (world.Z >= PURGE_MIN_ZOMBIES)
+        import crossings
+        hidden = crossings.surprise(world)               # (a fresh landing: not found yet)
+        if hidden is not None:
+            target &= ~hidden
+        target = target.reshape(-1)
         idx = np.flatnonzero(target)
         if idx.size == 0:
             return

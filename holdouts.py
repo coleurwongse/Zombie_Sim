@@ -1,8 +1,8 @@
 """Holdouts: now and then a city the horde is about to overrun doesn't fall.
 
 Every CHECK_EVERY ticks, each city (meta.json cities) that still has people, is about to be overrun (THREAT zombies
-within 3 tiles) and isn't fortified yet gets ONE roll (HOLDOUT_CHANCE - so it happens, but not often): its people
-barricade the streets (only the bigger half of the cities: small towns just fall).  If its government still stands, the city becomes one of its fortified sites (a garrison at
+within NEAR tiles) and isn't fortified yet gets ONE roll (HOLDOUT_CHANCE - about two cities in five - and again, if it held, when a later wave comes (REROLL)): its people
+barricade the streets (not the smallest of the cities: small towns just fall).  If its government still stands, the city becomes one of its fortified sites (a garrison at
 full strength); if nobody governs it any more, it becomes a free city of its own.  A barricaded city keeps the horde
 out for as long as enough people man it (defense 7) - but it can still starve, riot or be worn down.
 """
@@ -12,10 +12,14 @@ import economy
 import govern
 
 CHECK_EVERY = 5
-HOLDOUT_CHANCE = 0.025
-THREAT = 250              # zombies within 3 tiles: the horde is at the gates
-MIN_PEOPLE = 100          # people in the city centre needed to man the barricades
-BIG_CITY = 0.5            # only cities at least as big as this share of the map's cities (the median) get a roll
+MANY_CITIES = 200         # a map with more cities than this (the world: ~2500) gives each a smaller chance (x the
+                          # square root of MANY_CITIES / cities): a few dozen holdouts on a continent, not hundreds
+REROLL = 150              # a city that didn't barricade itself gets another roll this many days later
+HOLDOUT_CHANCE = 0.4
+THREAT = 250              # zombies within NEAR tiles: the horde is coming (it barricades before its people flee)
+NEAR = 6
+MIN_PEOPLE = 40           # people left in the city centre needed to man the barricades (many have fled by then)
+BIG_CITY = 0.15           # only cities bigger than this share of the map's cities get a roll (the smallest just fall)
 RADIUS = 1                # the barricaded block: (2 x RADIUS + 1) square around the centre
 LEVEL = 7
 FREE_RADIUS = 2           # a free city takes the populated land this close to its centre
@@ -27,23 +31,23 @@ def step(world):
     if world.ticks % CHECK_EVERY or not world.cities:
         return
     checked = getattr(world, "_holdout_checked", None)
-    if checked is None:
-        checked = world._holdout_checked = set()
+    if not isinstance(checked, dict):
+        checked = world._holdout_checked = {}
     big = getattr(world, "_holdout_big", None)
     if big is None:
         big = world._holdout_big = float(np.quantile([ct[3] for ct in world.cities], BIG_CITY))
-    near3 = world.zombie_near(3)
+    near3 = world.zombie_near(NEAR)
     H, Z, O, D = world.H, world.Z, world.O, world.D
     forts = None
     for name, r, c, pop in world.cities:
-        if pop < big or (r, c) in checked or H[r, c] < MIN_PEOPLE or near3[r, c] < THREAT or Z[r, c] > H[r, c]:
+        if pop < big or world.ticks - checked.get((r, c), -REROLL) < REROLL or H[r, c] < MIN_PEOPLE or near3[r, c] < THREAT or Z[r, c] > H[r, c]:
             continue
         if forts is None:
             forts = world.fort_mask()
         if forts[r, c]:
             continue
-        checked.add((r, c))
-        if world.pyrng.random() >= HOLDOUT_CHANCE:
+        checked[(r, c)] = world.ticks
+        if world.pyrng.random() >= HOLDOUT_CHANCE * min(1.0, (MANY_CITIES / len(world.cities)) ** 0.5):
             continue
         _barricade(world, name, r, c)
         forts = None
@@ -69,7 +73,8 @@ def _barricade(world, name, r, c):
         region = np.zeros(world.H.shape, dtype=bool)
         for rc in _block(world, r, c, FREE_RADIUS) or [(r, c)]:
             region[rc] = True
-        civ.gov = "junta" if world.pyrng.random() < 0.5 else "democracy"
+        prev_ = int(world.last_owner[r, c])
+        civ.gov = govern.choose(world, region, world.civs[prev_] if prev_ else None, sites=1)
         civ.successor, civ.founded = True, world.ticks
         prev = world.last_owner[r, c]
         civ.root = world.civs[int(prev)].root if prev else civ.id
