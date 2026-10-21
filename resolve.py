@@ -88,6 +88,8 @@ def rot(world):
         hit = (world.rng.random(rr.size) < DUST_ROT) if world.stochastic else np.zeros(rr.size, dtype=bool)
         Zw[rr[hit], cc[hit]] = 0
     lone = (Zw > 0) & alone
+    import hordes                                       # (zombies holding taken land near people don't starve)
+    lone &= ~hordes.occupied(world)[win]
     import zombies                                      # (a horde on the march toward people isn't starving yet)
     way, far = zombies.far_scent(world)
     k = zombies.FAR_CELL

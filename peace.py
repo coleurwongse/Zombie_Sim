@@ -70,6 +70,7 @@ def step(world):
         if civ.calm_ticks >= PEACE_AFTER:
             civ.peace = True
             world.note(f"{civ.name} declares the emergency over and starts to rebuild")
+            civ.veteran = True                       # (it has been through it: next time it mobilizes fast - front.py)
     if world.ticks % EVERY:
         return
     calm = [c for c in world.civs if c.ai and c.peace and not c.collapsed]

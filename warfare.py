@@ -74,7 +74,8 @@ def _raid(world, w, att, tgt):
     import war
     win = war._pair_window(world, att.id, tgt.id, RAID_REACH + 1)
     H, O, D = world.H[win], world.O[win], world.D[win]
-    near = box_sum(O == att.id, RAID_REACH) > 0
+    from civilization import steps                        # (over land: a raid doesn't cross the sea)
+    near = steps(O == att.id, RAID_REACH, through=world.statics.land[win]) <= RAID_REACH
     prey = (O == tgt.id) & near & (H > 40) & (D < 7)
     if not prey.any():
         return
@@ -95,9 +96,11 @@ def _raid(world, w, att, tgt):
     att.military = max(0.0, att.military - RAID_COST)
     tgt.riot_hit += 1
     w["raids"] = w.get("raids", 0) + 1
-    if w["raids"] % 4 == 1:
+    rr, cc = r + (win[0].start or 0), c + (win[1].start or 0)
+    import globalaffairs
+    globalaffairs.mark(world, rr, cc, "raid")
+    if w["raids"] % 2 == 1:
         from fracture import _place
-        rr, cc = r + (win[0].start or 0), c + (win[1].start or 0)
         world.note(f"{att.name} raids {_place(world, (rr, cc))} ({tgt.name}): {world.people(killed.sum())} dead, "
                    f"stores carried off")
 
@@ -131,9 +134,11 @@ def _guerrillas(world, w):
         if back.any():
             O[idx[back]] = loser
             w["guerrilla"] = w.get("guerrilla", 0) + int(back.sum())
-            if w["guerrilla"] - int(back.sum()) < 5 <= w["guerrilla"] or world.pyrng.random() < 0.05:
+            r, c = divmod(int(idx[back][0]), world.cols)
+            import globalaffairs
+            globalaffairs.mark(world, r, c, "partisan")
+            if w["guerrilla"] - int(back.sum()) < 3 <= w["guerrilla"] or world.pyrng.random() < 0.15:
                 from fracture import _place
-                r, c = divmod(int(idx[back][0]), world.cols)
                 world.note(f"partisans drive {occ.name} out of {_place(world, (r, c))} ({orig.name} takes it back)")
 
 
@@ -175,4 +180,6 @@ def _landing(world, w, att, tgt):
     ys, xs = np.nonzero(head)
     taken.extend(((ys + r0) * world.cols + xs + c0).tolist())
     from fracture import _place
+    import globalaffairs
+    globalaffairs.mark(world, r, c, "landing")
     world.note(f"{att.name} lands troops at {_place(world, (r, c))} ({tgt.name}): a beachhead of {n} districts")

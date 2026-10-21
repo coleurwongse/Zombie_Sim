@@ -40,6 +40,7 @@ FULL_MATERIALS = 10.0
 ALERT_RATE = 0.016         # mobilization: a government that sees zombies in its region builds its line up over
 ALERT_FADE = 0.002          # ~1/ALERT_RATE ticks (an outbreak catches everyone unprepared), and stands it down slowly
 ALERT_ZOMBIES = 100
+VETERAN_ALERT = 4.0         # a government that has come through an outbreak (peace.py) mobilizes (1 + this) x as fast
 ALARM_ALERT = 0.3           # alert every government keeps once the world is fully alarmed
 LINE_TILES = 60             # front tiles an average-sized government can man at full strength
 RESOLVE_LINE = 1.6          # a government that has adapted to the fight (resolve.py) holds its line this much better
@@ -84,7 +85,9 @@ def strengths(world):
         threat = c.m.get("zone_z", 0) >= ALERT_ZOMBIES if c.m else False
         if world.ticks < c.traits.get("denial", 0):
             threat = False                                 # a cover-up: officially, nothing is happening
-        c.alert = min(1.0, c.alert + ALERT_RATE) if threat else max(0.0, c.alert - ALERT_FADE)
+        # (a country that has been through an outbreak and stood down mobilizes fast the next time: peace.py)
+        rate = ALERT_RATE * (1.0 + VETERAN_ALERT * bool(getattr(c, "veteran", False)))
+        c.alert = min(1.0, c.alert + rate) if threat else max(0.0, c.alert - ALERT_FADE)
         if world.ticks >= c.traits.get("denial", 0):
             c.alert = max(c.alert, ALARM_ALERT * getattr(world, "alarm", 0.0))
         if c.military < LINE_MIN_ARMY or c.materials <= 0:

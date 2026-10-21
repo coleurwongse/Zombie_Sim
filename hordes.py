@@ -48,6 +48,11 @@ STAY_RATIO = 1.5           # when a horde moves on to a bigger prize, a nation i
 STAY_CELLS = 12            # this many zombies per person of it for itself - the part of the horde nearest it: that
 STAY_MIN = 20              # stays and finishes it off (cells with STAY_MIN people or more), the rest marches on ...
 STAY_MAX = 0.5             # ... but at most this share of the zombies heading for one prize stay behind
+OCCUPY_REACH = 12          # land the zombies have taken - lived on once, empty now - this close to living people ...
+OCCUPY_Z = 40              # ... keeps its zombies: tiles with fewer than this don't march off, they hold it (and don't
+                           # starve: resolve.py) - so the people can't just walk back in behind the horde ...
+OCCUPY_MASS = 1500         # ... while the zombies there are a real force (this many within OCCUPY_REACH): a few
+                           # leftovers starve as before, and don't smoulder on to start the outbreak again later
 ENGAGED = 2                # tiles within this many of people don't march on: they're attacking
 COORD_DAMP = 0.75          # engine.SPREAD x (1 - this x coordination)
 NOTE_MIN = 3000            # hordes this big are reported when they turn on a new city
@@ -245,7 +250,7 @@ def march(world):
     # (zombies at people - on them or next to them - are busy eating: they attack, the hunt moves them; zombies.py)
     from civilization import box_sum
     engaged = box_sum(world.H > 10, ENGAGED) > 0
-    rr, cc = np.nonzero((Z >= HORDE_Z) & world.statics.land & ~engaged)
+    rr, cc = np.nonzero((Z >= HORDE_Z) & world.statics.land & ~engaged & ~occupying(world))
     if rr.size == 0:
         return 0
     R, C = plan_["shape"]
@@ -278,6 +283,28 @@ def march(world):
         amount = np.floor(base[ok][fine] * share * mv + frac).astype(np.int64)
         moved += transport(world, sr[fine], sc[fine], tr[fine], tc[fine], amount)
     return moved
+
+
+def occupied(world):
+    """Land the zombies hold near living people (OCCUPY_*): once lived on, empty now, within OCCUPY_REACH of people.
+    Cached for the tick."""
+    memo = getattr(world, "_occupied", None)
+    if memo is not None and memo[0] == world.ticks:
+        return memo[1]
+    from civilization import box_sum
+    h0 = getattr(world, "H0", None)
+    if h0 is None:
+        out = np.zeros(world.H.shape, dtype=bool)
+    else:
+        out = ((h0 > 10) & (world.H <= 10) & (box_sum(world.H > 10, OCCUPY_REACH) > 0)
+               & (world.zombie_near(OCCUPY_REACH) >= OCCUPY_MASS))
+    world._occupied = (world.ticks, out)
+    return out
+
+
+def occupying(world):
+    """Horde tiles that stay to hold taken land (thin ones on occupied land)."""
+    return occupied(world) & (world.Z < OCCUPY_Z)
 
 
 def _rear_guard(world, plan_, rr, cc, gr, gc):

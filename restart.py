@@ -52,9 +52,13 @@ RESETTLE_GIVE = 0.1       # ... and gives this share of what it has above that (
 RESETTLE_CROWD = 0.25      #     this share of what it holds above RESETTLE_FULL of its pre-outbreak level (a place
 RESETTLE_FULL = 0.6        #     filling up sends its young people out to the empty land around - that's how it spreads)
 RESETTLE_MIN_MORALE = 4
+TOWN_PULL = 1.0            # settlers shared out by (what a place is rebuilt to) ** this
 RESETTLE_EMPTY_FIRST = 300   # emptied tiles are settled before half-empty ones are filled up
-RESETTLE_DANGER = 0.7      # a government in more danger than this has other things to do
+RESETTLE_DANGER = 0.25     # a government in more danger than this - or whose outbreak is growing - has other things
+                           # to do than settling land (it fights, fortifies, holds on)
 HOME_MIN = 30              # (maps that don't know the pre-outbreak population: tiles fill up to this)
+PIONEER_RAGGED = 0.6       # (x 1 +- this from place to place: civilization.fine_jag) ...
+PIONEER_ROUGH = 1.5        # ... and / (1 + this x how much rough ground slows the going: terrain.MOVE)
 PIONEER_REACH = 6          # settlers also strike out this many tiles (over land) beyond the border into clean, empty land
 SETTLE_HOME = 11           # only land that held at least this many people before is worth resettling
 STRAY_OK = 2               # zombies within 2 tiles that still let people have children and resettle
@@ -190,7 +194,8 @@ def _working(world):
     ok = np.zeros(len(world.civs), dtype=bool)
     for c in world.civs:
         if c.id and c.ai and not c.collapsed and c.morale >= RESETTLE_MIN_MORALE and c.m and c.m.get("n"):
-            ok[c.id] = c.threat(c.m) < RESETTLE_DANGER        # (not its past losses: that's why it rebuilds)
+            ok[c.id] = (c.threat(c.m) < RESETTLE_DANGER       # (not its past losses: that's why it rebuilds)
+                        and c.m.get("growth", 0.0) <= 0.05 and c.m.get("pop_overrun", 0.0) < 0.05)
     return ok
 
 
@@ -220,19 +225,47 @@ def resettle(world):
     land = world.statics.land
     rush = _rush(world)
     reach = np.where(rush > 1.0, PIONEER_RUSH, PIONEER_REACH)       # (an emptied continent: much further out)
+    # how far out they go varies from place to place (fine_jag) and they go less far into rough ground: a ragged
+    # spread along the lie of the land, not a disc round the border
+    from civilization import fine_jag
+    slow = 1.0 + PIONEER_ROUGH * (1.0 - world.statics.move.reshape(H.shape))
+    lim = (1.0 + PIONEER_RAGGED * fine_jag(world)) / slow
+    # (grown outward a step at a time from the advancing front only - side steps and diagonal ones alternating, so the
+    #  spread is round-ish before the lie of the land makes it ragged)
+    S = world.statics
+    ef, lf, Of, landf = edge.ravel().copy(), lim.ravel(), O.ravel(), land.ravel()
+    front = np.flatnonzero(ef > 0)
     for k in range(int(reach.max()) - 1):
-        grow = edge.copy()
-        far = reach[edge] > k + 1
+        if front.size == 0:
+            break
+        owner = ef[front]
+        keep = reach[owner] * lf[front] > k + 1
+        front, owner = front[keep], owner[keep]
+        new = []
         for dr, dc in (DIRECTIONS if k % 2 else ((-1, 0), (1, 0), (0, -1), (0, 1))):     # (round, not square)
-            sr, tr = _slices(H.shape[0], dr)
-            sc, tc = _slices(H.shape[1], dc)
-            view = grow[tr, tc]
-            np.copyto(view, edge[sr, sc], where=(view == 0) & (edge[sr, sc] > 0) & far[sr, sc] & (O[tr, tc] == 0)
-                      & land[tr, tc])
-        edge = grow
+            nb = S.nbr[(dr, dc)][front]
+            on = nb >= 0
+            nbo, own = nb[on], owner[on]
+            on = (ef[nbo] == 0) & (Of[nbo] == 0) & landf[nbo] & (reach[own] * lf[nbo] > k + 1)
+            nbo, own = nbo[on], own[on]
+            if nbo.size:
+                nbo, first = np.unique(nbo, return_index=True)
+                new.append((nbo, own[first]))
+        for nbo, own in new:                                # (this step's growth: from last step's front only)
+            fresh = ef[nbo] == 0
+            ef[nbo[fresh]] = own[fresh]
+        front = np.concatenate([nbo for nbo, _ in new]) if new else np.zeros(0, dtype=np.int64)
+    edge = ef.reshape(edge.shape)
     who = np.where(O > 0, claim, np.where(world.may_claim(edge), edge, 0))
     target = ((who > 0) & ok[who] & safe & (Z == 0) & habitable(T) & (hm >= SETTLE_HOME)
               & (H < 0.5 * hm) & (H >= 0))
+    if not target.any():
+        return 0
+    # settlers walk there: only land joined to the government's own safe, lived-on land by safe ground (never through
+    # a horde to the far side of it)
+    reg, nreg = label_components(safe & land)
+    keyed = np.unique(reg[(O > 0) & (H > 10) & safe].astype(np.int64) * n + O[(O > 0) & (H > 10) & safe])
+    target &= np.isin(reg.astype(np.int64) * n + who, keyed) & (reg > 0)
     if not target.any():
         return 0
     # people to spare: crowded tiles give more
@@ -271,13 +304,20 @@ def resettle(world):
     taken[give <= 0] = 0
     H -= taken
     got = np.bincount(O.ravel(), weights=taken.ravel(), minlength=n)
-    per = np.floor(got[owner] / np.maximum(np.bincount(owner, minlength=n)[owner], 1)).astype(np.int32)
+    # (shared out by what each place is rebuilt to: a town gets more of them than a farm - a country coming back has
+    #  towns and countryside, not one even spread)
+    wt = np.maximum(hm.ravel()[idx].astype(np.float64), 1.0) ** TOWN_PULL
+    per = np.floor(got[owner] * wt / np.maximum(np.bincount(owner, weights=wt, minlength=n)[owner], 1e-9)).astype(np.int32)
+    per = np.minimum(per, np.maximum(hm.ravel()[idx] - H.ravel()[idx], 0).astype(np.int32) + RESETTLE_GROUP)
     Hf, Of = H.reshape(-1), O.reshape(-1)
     Hf[idx] += per
     Of[idx] = np.where(per > 0, owner, Of[idx])
-    leftover = (got - np.bincount(owner, weights=per, minlength=n)).astype(np.int32)   # (what rounding left over goes
-    _, first = np.unique(owner, return_index=True)                                    #  with the first group)
-    Hf[idx[first]] += leftover[owner[first]]
+    leftover = (got - np.bincount(owner, weights=per, minlength=n)).astype(np.int32)   # (what's left over: spread
+    count = np.bincount(owner, minlength=n)                                           #  evenly over the places ...)
+    even = (leftover // np.maximum(count, 1)).astype(np.int32)
+    Hf[idx] += even[owner]
+    _, first = np.unique(owner, return_index=True)                                    # (... the rest with the first)
+    Hf[idx[first]] += (leftover - even * count)[owner[first]]
     return int(got.sum())
 
 

@@ -50,6 +50,7 @@ LANDING_MIN = 25           # a landmass smaller than this (tiles) is no place to
 ISLAND_SHARE = 0.05        # a landmass with less than this share of all the land is an island (Britain .. Australia)
 STRAND_MIN = 150           # an island with this many zombies and nobody left on it ...
 STRAND_SHARE = 0.8         # ... sends this share of the zombies near its busiest shore into the sea every CROSS_EVERY
+STRAND_RETRY = 30          # (an island with no way off: look again only after this many days)
 STRAND_MAX = 3             # days - at most this many from one island at sea at once (beyond CROSS_MAX)
 MIN_EACH = 35              # (each tile of the swimming horde holds at least this many - so it shows)
 # Hordes don't swim across lakes (water nobody can sail out of: the Caspian, the Sea of Rhun) - they walk round.
@@ -87,8 +88,12 @@ def _leave_island(world, sea, mass, n_z):
     if cand.size == 0:
         return
     r, c = divmod(int(cand[int(np.argmax(near.ravel()[cand]))]), world.cols)
+    tried = world.__dict__.setdefault("_strand_tried", {})          # (no way off it last time: don't search the
+    if world.ticks - tried.get(mass, -10 ** 6) < STRAND_RETRY:       #  whole sea again every other day)
+        return
     path = _route(world, r, c, inhabited=True)
     if path is None:
+        tried[mass] = world.ticks
         return
     Z = world.Z
     r0, r1, c0, c1 = max(r - 3, 0), r + 4, max(c - 3, 0), c + 4
@@ -175,76 +180,123 @@ def _touches(mask):
     return out
 
 
+def _route_tables(world):
+    """What every route search needs, worked out once per tick: people per landmass, which countries anyone still
+    lives in, and how well each shore is held."""
+    memo = getattr(world, "_route_memo", None)
+    if memo is not None and memo[0] == world.ticks:
+        return memo[1]
+    lm = world.statics.landmass
+    size = _landmass_size(world)
+    lived_tile = (world.H > 10).ravel()
+    peopled = np.bincount(lm.ravel(), weights=lived_tile, minlength=size.size)
+    lived = np.bincount(world.O0.ravel(), weights=lived_tile, minlength=len(world.civs)) > 0
+    from civilization import protection
+    guard = (LANDING_GUARD * np.maximum(protection(world) - 2.0, 0.0)).astype(np.float32)
+    out = (size, peopled, lived, guard)
+    world._route_memo = (world.ticks, out)
+    return out
+
+
 def _route(world, r, c, inhabited=False):
     """The way over water from the coast at (r, c) to a coast of another landmass within CROSS_REACH steps: for every
     landmass in reach its nearest landing (a shore with people on it a little preferred); then the landmass that is
     nearest, counting one many hordes have reached already as further (CROSS_NOVELTY).  A list of water tiles ending
-    with the landing, or None."""
+    with the landing, or None.  (A breadth-first search over the water, done for the whole window at once.)"""
     S = world.statics
-    land = S.land
-    mass = regions(world)
-    rows, cols = land.shape
-    home = int(mass[r, c])
-    O0 = world.O0
-    home_c = int(O0[r, c])
-    lake = lakes(world)
-    lm = S.landmass
-    size = _landmass_size(world)
-    peopled = np.bincount(lm.ravel(), weights=(world.H > 10).ravel(), minlength=size.size)
-    alive = peopled > 0                                     # (zombies leaving an island eaten bare want people)
-    from civilization import protection
-    guard = LANDING_GUARD * np.maximum(protection(world) - 2.0, 0.0)
-    lived = np.bincount(O0.ravel(), weights=(world.H > 10).ravel(), minlength=len(world.civs)) > 0
-    prev = {}
-    q = deque()
-    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        rr, cc = r + dr, (c + dc) % cols if world.wrap else c + dc
-        if 0 <= rr < rows and 0 <= cc < cols and not land[rr, cc] and not lake[rr, cc]:
-            prev[(rr, cc)] = None
-            q.append((rr, cc, 1))
-    best = {}                                               # landmass -> (score, water tile, landing)
-    while q:
-        rr, cc, d = q.popleft()
-        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nr, nc = rr + dr, cc + dc
-            if world.wrap:
-                nc %= cols
-            if not (0 <= nr < rows and 0 <= nc < cols):
-                continue
-            if land[nr, nc]:
-                m = int(mass[nr, nc])
-                if inhabited and not alive[S.landmass[nr, nc]]:
-                    continue
-                if size[lm[nr, nc]] < LANDING_MIN and peopled[lm[nr, nc]] < LANDING_MIN:    # (a rock)
-                    continue
-                if (m == home and d >= ACROSS and home_c and int(O0[nr, nc]) not in (0, home_c)
-                        and lived[int(O0[nr, nc])]):
-                    m = ("country", int(O0[nr, nc]))          # (another country across the water: the Channel -
-                                                              #  while anyone lives there: else they walk round)
-                if m != home:
-                    score = (d - (4 if world.H[nr, nc] > 10 else 0)       # (a shore with people on it draws them,
-                             + guard[nr, nc])                                 #  a fortified one doesn't)
-                    if m not in best or score < best[m][0]:
-                        best[m] = (score, (rr, cc), (nr, nc), d)
-                continue
-            if (nr, nc) in prev or d >= CROSS_REACH or lake[nr, nc]:
-                continue
-            prev[(nr, nc)] = (rr, cc)
-            q.append((nr, nc, d + 1))
-    if not best:
+    rows, cols = S.land.shape
+    R = CROSS_REACH + 1
+    ri = np.arange(max(r - R, 0), min(r + R + 1, rows))
+    ci = np.arange(c - R, c + R + 1)
+    ci = ci % cols if world.wrap else ci[(ci >= 0) & (ci < cols)]
+    if world.wrap and ci.size > cols:
+        ci = ci[:cols]
+    ix = np.ix_(ri, ci)
+    land = S.land[ix]
+    water = ~land & ~lakes(world)[ix]
+    y0 = int(np.flatnonzero(ri == r)[0])
+    x0 = int(np.flatnonzero(ci == c)[0])
+    h, w_ = land.shape
+
+    def grow(mask):                                       # (4-neighbours of a mask)
+        out = np.zeros_like(mask)
+        out[1:] |= mask[:-1]
+        out[:-1] |= mask[1:]
+        out[:, 1:] |= mask[:, :-1]
+        out[:, :-1] |= mask[:, 1:]
+        return out
+    dist = np.zeros(land.shape, dtype=np.int32)          # (0 = not reached)
+    start = np.zeros(land.shape, dtype=bool)
+    start[y0, x0] = True
+    front = grow(start) & water
+    d = 1
+    dist[front] = 1
+    while front.any() and d < CROSS_REACH:
+        front = grow(front) & water & (dist == 0)
+        d += 1
+        dist[front] = d
+    # landings: land next to reached water, at the smallest such distance
+    big = np.iinfo(np.int32).max
+    dd = np.where(dist > 0, dist, big)
+    near = np.full(land.shape, big, dtype=np.int32)
+    near[1:] = np.minimum(near[1:], dd[:-1])
+    near[:-1] = np.minimum(near[:-1], dd[1:])
+    near[:, 1:] = np.minimum(near[:, 1:], dd[:, :-1])
+    near[:, :-1] = np.minimum(near[:, :-1], dd[:, 1:])
+    cand = land & (near < big)
+    if not cand.any():
         return None
+    size, peopled, lived, guard = _route_tables(world)
+    mass = regions(world)
+    home = int(mass[r, c])
+    home_c = int(world.O0[r, c])
+    ys, xs = np.nonzero(cand)
+    gr, gc = ri[ys], ci[xs]
+    lmk = S.landmass[gr, gc]
+    ok = (size[lmk] >= LANDING_MIN) | (peopled[lmk] >= LANDING_MIN)          # (not a rock)
+    if inhabited:
+        ok &= peopled[lmk] > 0                            # (zombies leaving an island eaten bare want people)
+    m = mass[gr, gc].astype(np.int64)
+    o0 = world.O0[gr, gc].astype(np.int64)
+    country = ((m == home) & (near[ys, xs] >= ACROSS) & (home_c != 0) & (o0 != 0) & (o0 != home_c)
+               & lived[np.minimum(o0, lived.size - 1)])
+    ok &= (m != home) | country                           # (another country across the water: the Channel -
+    if not ok.any():                                      #  while anyone lives there: else they walk round)
+        return None
+    ys, xs, gr, gc, m, o0, country = ys[ok], xs[ok], gr[ok], gc[ok], m[ok], o0[ok], country[ok]
+    dl = near[ys, xs]
+    score = dl - 4.0 * (world.H[gr, gc] > 10) + guard[gr, gc]     # (a shore with people on it draws them, a
+    keys = [("country", int(o)) if cty else int(k) for k, o, cty in zip(m, o0, country)]   # fortified one doesn't)
+    best = {}
+    for j in np.argsort(score, kind="stable"):
+        k = keys[j]
+        if k not in best:
+            best[k] = (float(score[j]), int(j), int(dl[j]))
     reached = getattr(world, "_cross_reached", {})
+
     def far(k):
         n = reached.get(k, 0)
-        return (max(best[k][3], 1) * (1.0 + CROSS_NOVELTY * n) * (CROSS_NEW if n == 0 else 1.0)
+        return (max(best[k][2], 1) * (1.0 + CROSS_NOVELTY * n) * (CROSS_NEW if n == 0 else 1.0)
                 * (CROSS_STRAIT if isinstance(k, tuple) else 1.0))
-    m = min(best, key=far)
-    _, water, landing, _ = best[m]
-    world._cross_key = m
-    path, cur = [landing], water
-    while cur is not None:
-        path.append(cur)
-        cur = prev[cur]
+    k = min(best, key=far)
+    world._cross_key = k
+    _, j, dl = best[k]
+    y, x = int(ys[j]), int(xs[j])
+    # back over the water: from the landing down the distances to the start
+    path = [(int(ri[y]), int(ci[x]))]
+    cy, cx, cur = y, x, dl + 1
+    while cur > 1:
+        nxt = None
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            yy, xx = cy + dy, cx + dx
+            if 0 <= yy < h and 0 <= xx < w_ and dist[yy, xx] == cur - 1:
+                nxt = (yy, xx)
+                break
+        if nxt is None:
+            return None
+        cy, cx = nxt
+        cur -= 1
+        path.append((int(ri[cy]), int(ci[cx])))
     return _straighten(world, path[::-1])                   # water tiles from the start out, then the landing
 
 

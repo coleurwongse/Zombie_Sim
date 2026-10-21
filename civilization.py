@@ -210,6 +210,18 @@ def jag(world, win=(slice(None), slice(None))):
     return f[win]
 
 
+def fine_jag(world, win=(slice(None), slice(None))):
+    """Like jag, but varying over a few tiles (cells of 6..24 tiles): -1..1.  For small shapes - a town's fields, a
+    colony's first districts - whose edges jag's broad swells would leave round."""
+    f = getattr(world, "_fine_jag", None)
+    if f is None or f.shape != world.H.shape:
+        from make_world import fbm
+        seed = int(getattr(world, "seed", 0) or 0) if getattr(world, "stochastic", False) else 0
+        g = fbm(np.random.default_rng(seed + 91), world.rows, world.cols, cells=(6, 12, 24))
+        f = world._fine_jag = np.clip((g - g.mean()) / (2.0 * g.std() + 1e-9), -1.0, 1.0).astype(np.float32)
+    return f[win]
+
+
 def within(world, mask, reach, win=(slice(None), slice(None)), through=None):
     """Tiles within about `reach` steps of `mask` (cut to window `win`): a ragged, roundish band - no boxes."""
     return steps(mask, reach + 2, through) <= reach + jag(world, win)

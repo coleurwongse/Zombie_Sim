@@ -42,6 +42,7 @@ Files
   war.py             wars, civil wars, alliances      nukes.py      nuclear weapons
   warfare.py         raids on towns, strikes, partisans in rough country, sea landings
   landuse.py         land changing with its people: fields cleared, suburbs and new towns built, cities ruined
+  globalaffairs.py   expeditions abroad, reconstruction aid, pacts, proxy wars, tributaries, revolutions, conquest
   peace.py           standing down after the emergency, people going back to town
   restart.py         rebuilding: births, resettlement, pioneers, villages, annexing clean land, survivors founding states
   holdouts.py        besieged cities that barricade themselves       quarantine.py  shut borders
@@ -328,3 +329,28 @@ Landings, rebuilding and war
   hills, mountains, marsh, jungle) is harder to take and costs its defenders less - and ground taken there breeds
   partisans who kill the occupier's people and soldiers and win districts back; a strong side with ports lands
   troops on a weakly held enemy coast and takes a beachhead.
+
+Global affairs (globalaffairs.py)
+  Nobody sits it out.  Strong countries that are safe at home send expeditionary forces to fallen cities anywhere
+  they can reach - over land, by sea, or by air with the strongest armies - and sweep the hordes there for a few
+  months, at a cost in soldiers, materials and army strength; rich countries send materials and food to friends
+  rebuilding.  Countries that fought side by side, or share an enemy, sign defensive pacts (they never fight each
+  other and stand by each other when attacked); outside powers arm the side they favour in a war (proxy wars);
+  strong countries make weak neighbours pay tribute, and a war won outright ends with the loser a satellite - until
+  the overlord falters.  A government in deep trouble (famine, morale broken, a long war - but not with the zombies
+  at the gates) may fall to a revolution: a new form of government and a new name.  Strong aggressive countries go to
+  war for land; organized states raid the villages nobody governs near them.
+  Raids, strikes, landings, partisans, expeditions, revolutions and tributes are marked on the map for a month
+  (x raid, o strike, ^ landing, o partisans, + expedition, o revolution, ^ tribute - the legend is at the top right).
+
+Recovery and holding ground
+  A government doesn't resettle land while it's under attack (danger above 0.25, its outbreak growing, people being
+  overrun), and only land joined to its own safe, lived-on land by safe ground - settlers don't walk through a horde.
+  Settlers are shared out by what each place is rebuilt to, so towns fill before farms: a country coming back has
+  towns and countryside, not an even spread.  Pioneers go further on open ground than into rough country, and how
+  far varies from place to place (civilization.fine_jag): no round blobs.
+  The zombies hold what they take: on land they have emptied near living people, thin groups stay put instead of
+  marching off, and don't starve - the land can't be quietly resettled behind the horde (hordes.OCCUPY_*).  A
+  country that has come through an outbreak and stood down mobilizes five times as fast the next time zombies turn
+  up in its region (front.VETERAN_ALERT): a late horde is met, not ignored until it's continent-sized.
+  A state with no town of its own is named after a free town nearby (within 15 tiles) before "North Somewhere".

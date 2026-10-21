@@ -98,14 +98,18 @@ def alliance(world, civ_id):
 
 
 def allied(world, a, b):
-    """Members of the same alliance (different countries) - they don't fight each other."""
+    """Members of the same alliance (different countries), or bound by a pact (globalaffairs.py) - they don't fight
+    each other."""
+    import globalaffairs
+    if globalaffairs.in_pact(world, a, b):
+        return True
     if world.civs[a].root == world.civs[b].root:
         return False
     x = alliance(world, a)
     return x is not None and x == alliance(world, b)
 
 
-def declare(world, a, b, reason="", quiet=False, civil=False):
+def declare(world, a, b, reason="", quiet=False, civil=False, join=True):
     k = key(a, b)
     if k in world.wars or allied(world, a, b):
         return
@@ -113,12 +117,30 @@ def declare(world, a, b, reason="", quiet=False, civil=False):
     what = "CIVIL WAR" if civil else "WAR"
     verb = "fights" if civil else "attacks"
     world.note(f"{what}: {world.civs[a].name} {verb} {world.civs[b].name}" + (f" ({reason})" if reason else ""))
+    if join and not civil:                                # (its pact partners stand by it)
+        import globalaffairs
+        for pk in list(globalaffairs.pacts(world)):
+            if b in pk:
+                p = world.civs[next(iter(pk - {b}))]
+                if (p.ai and not p.collapsed and p.id != a and not at_war(world, p.id) and _danger(p) < 0.35
+                        and not allied(world, p.id, a)):
+                    world.note(f"{p.name} stands by its pact with {world.civs[b].name}")
+                    declare(world, p.id, a, "its pact", join=False)
 
 
 def end(world, k, why):
     w = world.wars.pop(k)
     what = "civil war over" if w.get("civil") else "PEACE"
     world.note(f"{what}: {world.civs[w['a']].name} and {world.civs[w['b']].name} ({why}) after {w['ticks']} ticks")
+    if not w.get("civil") and why in ("armistice", "exhaustion"):          # (a war won outright: a satellite)
+        import globalaffairs
+        for win_id, n in w.get("captured", {}).items():
+            lose_id = w["b"] if win_id == w["a"] else w["a"]
+            W, L = world.civs[win_id], world.civs[lose_id]
+            if (n >= globalaffairs.SATELLITE_TAKEN and not L.collapsed and not W.collapsed and L.m and W.m
+                    and L.m.get("pop", 0) < globalaffairs.SATELLITE_POP * W.m.get("pop", 1)
+                    and getattr(L, "overlord", None) is None):
+                globalaffairs.make_tributary(world, W, L, "wins the war")
 
 
 def at_war(world, civ_id):
@@ -347,6 +369,8 @@ def _strikes(world, w, min_army=STRIKE_MIN_ARMY):
         D[r0:r1, c0:c1] = np.maximum(D[r0:r1, c0:c1] - 1, 1)
         att.materials -= STRIKE_COST
         att.military = max(0.0, att.military - 0.002)
+        import globalaffairs
+        globalaffairs.mark(world, r, c, "strike")
         w["strikes"] = w.get("strikes", 0) + 1
         if w["strikes"] % 3 == 0:
             tgt.riot_hit += 1

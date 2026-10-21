@@ -123,13 +123,28 @@ def transport(world, rr, cc, tr, tc, amount):
     src = rr * cols + cc
     dst = tr * cols + tc
     amount = np.minimum(np.maximum(amount, 0), flat[src]).astype(np.float64)
-    out = np.bincount(src, weights=amount, minlength=flat.size)
-    inflow = np.bincount(dst, weights=amount, minlength=flat.size)
-    room = 255.0 - (flat - out)
+    # (only the tiles involved: sending, receiving or both)
+    uniq, inv = np.unique(np.concatenate([src, dst]), return_inverse=True)
+    si, di = inv[:src.size], inv[src.size:]
+    out = np.bincount(si, weights=amount, minlength=uniq.size)
+    inflow = np.bincount(di, weights=amount, minlength=uniq.size)
+    room = 255.0 - (flat[uniq] - out)
     scale = np.where(inflow > 0, np.clip(room / np.maximum(inflow, 1e-9), 0.0, 1.0), 1.0)
-    moved = np.floor(amount * scale[dst]).astype(Z.dtype)
-    np.subtract.at(flat, src, moved)
-    np.add.at(flat, dst, moved)
+    moved = np.floor(amount * scale[di])
+    net = np.bincount(di, weights=moved, minlength=uniq.size) - np.bincount(si, weights=moved, minlength=uniq.size)
+    # (a tile can still overflow when part of its own zombies couldn't leave - their way was full: whatever would
+    #  push it past 255 stays where it came from, instead of being cut off - lost - at the next clip)
+    base = flat[uniq].astype(np.float64)
+    for _ in range(6):
+        over = np.maximum(base + net - 255.0, 0.0)
+        if not over.any():
+            break
+        came = np.bincount(di, weights=moved, minlength=uniq.size)
+        back = np.ceil(moved * np.where(came > 0, over / np.maximum(came, 1e-9), 0.0)[di])
+        moved = np.maximum(moved - back, 0.0)
+        net = (np.bincount(di, weights=moved, minlength=uniq.size)
+               - np.bincount(si, weights=moved, minlength=uniq.size))
+    flat[uniq] += np.rint(net).astype(Z.dtype)
     return int(moved.sum())
 
 

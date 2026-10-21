@@ -231,6 +231,43 @@ def wrap(text, width, fnt, indent=""):
 
 _frame = {}
 
+# map marks (globalaffairs.mark): what happened where, fading over a few weeks
+MARK_STYLE = {"raid": ((255, 150, 40), "x"), "strike": ((255, 60, 60), "o"), "landing": ((80, 170, 255), "^"),
+              "partisan": ((90, 230, 110), "o"), "expedition": ((255, 255, 255), "+"),
+              "revolution": ((230, 90, 255), "o"), "tribute": ((255, 215, 0), "^"),
+              "conquest": ((255, 60, 60), "x"), "village": ((200, 140, 80), "x")}
+
+
+def draw_marks(half_w, half_h):
+    import globalaffairs
+    marks = globalaffairs.recent_marks(world)
+    if not marks:
+        return
+    size = max(4, min(10, int(zoom * 2)))
+    for t, r, c, kind in marks:
+        col, shape = MARK_STYLE.get(kind, ((255, 255, 255), "o"))
+        fade = 1.0 - (world.ticks - t) / (globalaffairs.MARK_DAYS + 1)
+        col = tuple(int(v * (0.35 + 0.65 * fade)) for v in col)
+        if world.wrap:                                   # (the copy of the tile nearest the view)
+            c = c + cols * round((cx - c) / cols)
+        x = int((c + 0.5 - (cx - half_w)) * zoom)
+        y = int((r + 0.5 - (cy - half_h)) * zoom)
+        if not (-size <= x < VIEW_W + size and -size <= y < VIEW_H + size):
+            continue
+        if shape == "x":
+            pygame.draw.line(screen, col, (x - size, y - size), (x + size, y + size), 2)
+            pygame.draw.line(screen, col, (x - size, y + size), (x + size, y - size), 2)
+        elif shape == "+":
+            pygame.draw.line(screen, col, (x - size, y), (x + size, y), 2)
+            pygame.draw.line(screen, col, (x, y - size), (x, y + size), 2)
+        elif shape == "^":
+            pygame.draw.polygon(screen, col, [(x, y - size), (x - size, y + size), (x + size, y + size)], 2)
+        else:
+            pygame.draw.circle(screen, col, (x, y), size, 2)
+    legend = "x raid  o strike  ^ landing  o partisans  + expedition  o revolution  ^ tribute"
+    img = small.render(legend, True, (170, 170, 185))
+    screen.blit(img, (VIEW_W - img.get_width() - 8, 6))
+
 
 def draw():
     key = (id(world), world.ticks, mode)                # (the map only changes when the world does)
@@ -255,6 +292,7 @@ def draw():
     ox = int(round((c0 - (cx - half_w)) * zoom))
     oy = int(round((r0 - (cy - half_h)) * zoom))
     screen.blit(surface, (ox, oy))
+    draw_marks(half_w, half_h)
     if show_text:
         mx, my = pygame.mouse.get_pos()
         if mx < VIEW_W:

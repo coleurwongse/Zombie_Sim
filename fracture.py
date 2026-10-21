@@ -127,8 +127,15 @@ def pick_capital(world, civ, mask=None):
 
 
 def _place(world, rc):
-    name = govern.nearest_city(world, _point(world, rc))
-    return name or f"({rc[0]},{rc[1]})"
+    """The named city nearest tile rc (one at the tile itself first) - for the log."""
+    cities = getattr(world, "cities", None)
+    if not cities:
+        return f"({rc[0]},{rc[1]})"
+    arr = getattr(world, "_city_rc", None)
+    if arr is None or arr[0] is not cities:
+        arr = world._city_rc = (cities, np.array([[r, c] for _, r, c, _ in cities], dtype=np.float64))
+    d = (arr[1][:, 0] - rc[0]) ** 2 + (arr[1][:, 1] - rc[1]) ** 2
+    return cities[int(np.argmin(d))][0]
 
 
 def _point(world, rc):
@@ -407,6 +414,7 @@ def fracture_all(world, civ, why, keep_core=True):
         return True
     civ.collapsed = True
     civ.collapsed_at = world.ticks
+    O[O == civ.id] = 0                                   # (bits too small to be a region of their own: nobody's)
     civ.active = set()
     civ.action = IGNORE
     civ.bases = []

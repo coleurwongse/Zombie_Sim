@@ -1390,6 +1390,29 @@ def main():
     assert head > 0, head
     print("92 a raid on a town carried off stores; partisans took back %d wooded districts; a landing took a "
           "beachhead of %d districts" % (back, head))
+    # 93. A state with no town of its own is named after a free town nearby, not "North Somewhere".
+    import govern
+    H, Z, D, T, O, A = blank(40, humans=100, owner=0)
+    w = DW(H, Z, D, T, O, A, meta={"wrap": False})
+    w.cities = [("Smallbridge", 20, 30, 0.1)]
+    region = np.zeros((40, 40), dtype=bool); region[18:23, 18:23] = True
+    nm = govern.state_name(w, "democracy", region, 1)
+    assert nm == "Republic of Smallbridge", nm
+    print("93 a townless state next to Smallbridge is the %s" % nm)
+    # 94. Zombies hold land they have taken near people: thin groups there don't march off after a far prize.
+    import hordes
+    H, Z, D, T, O, A = blank(80, humans=0, owner=0)
+    H[:, 70:] = 200; H[30:40, 5:10] = 60                    # (a far city; and a town nearby)
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.H0[25:45, 10:25] = 50                                 # (land lived on before, empty now)
+    w.Z[30:40, 15:20] = 30
+    z0 = int(w.Z[25:45, 10:25].sum())
+    for k in range(30):
+        w.ticks = k
+        hordes.step(w)
+    kept = int(w.Z[25:45, 10:25].sum())
+    assert kept >= 0.8 * z0, (kept, z0)
+    print("94 zombies holding taken land near a town: %d of %d stayed" % (kept, z0))
     print("all civ tests passed")
 
 

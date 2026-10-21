@@ -24,6 +24,7 @@ import expeditions
 import resolve
 import spread
 import landuse
+import globalaffairs
 import crossings
 import settlers
 import front
@@ -64,6 +65,22 @@ def fmt_people(v):
         if abs(v) >= div:
             return f"{v / div:.1f}{suffix}"
     return str(int(round(v)))
+
+
+def _box_from_table(t, r, rx, rows, cols):
+    """Box sums ((2r+1) rows x (2rx+1) cols, zero outside the map) from a table of running sums (rows+1 x cols+1):
+    the table padded with its own edge values, then four shifted slices."""
+    p = np.pad(t, ((r, r), (rx, rx)), mode="edge")
+    k, kx = 2 * r + 1, 2 * rx + 1
+    return p[k:k + rows, kx:kx + cols] - p[:rows, kx:kx + cols] - p[k:k + rows, :cols] + p[:rows, :cols]
+
+
+def _round_from_table(t, r, rows, cols):
+    """civilization.round_sum (int32), from the table."""
+    k = max(1, int(round(0.6 * r)))
+    s = _box_from_table(t, r, k, rows, cols) + _box_from_table(t, k, r, rows, cols) - _box_from_table(t, k, k, rows, cols)
+    box, cross = (2 * r + 1) ** 2, 2 * (2 * r + 1) * (2 * k + 1) - (2 * k + 1) ** 2
+    return (s * (box / cross)).astype(np.int32)
 
 
 class World:
@@ -301,11 +318,21 @@ class World:
         return mask
 
     def zombie_near(self, radius):
-        """Zombies within `radius` tiles of every tile (cached for the current tick)."""
+        """Zombies within `radius` tiles of every tile (cached for the current tick): the same count as
+        civilization.round_sum (an octagon: round edges, no square-cornered decisions), worked out from one table
+        of running sums per tick - every radius after the first costs a few array subtractions."""
         if self._near_tick != self.ticks:
             self._near_cache, self._near_tick = {}, self.ticks
+            self._near_table = None
         if radius not in self._near_cache:
-            self._near_cache[radius] = round_sum(self.Z, radius)       # (round: no square-cornered decisions)
+            if radius <= 1:
+                self._near_cache[radius] = round_sum(self.Z, radius)
+            else:
+                if self._near_table is None:
+                    t = np.zeros((self.rows + 1, self.cols + 1), dtype=np.int32)    # (255 x a million fits)
+                    np.cumsum(np.cumsum(self.Z, axis=0, dtype=np.int32), axis=1, out=t[1:, 1:])
+                    self._near_table = t
+                self._near_cache[radius] = _round_from_table(self._near_table, radius, self.rows, self.cols)
         return self._near_cache[radius]
 
     # ---------------------------------------------------------------------- tick
@@ -357,6 +384,7 @@ class World:
             fracture.independence(self)
             holdouts.step(self)
             aid.step(self)
+            globalaffairs.step(self)
             expeditions.step(self)
             peace.step(self)
             resolve.step(self)
@@ -458,24 +486,30 @@ class World:
             if c.capital is not None and c.id:
                 mass[c.id] = S.landmass[c.capital]
                 cr[c.id], cc[c.id] = c.capital
-        claimant = np.asarray(claimant)
-        home = mass[claimant]
-        if getattr(self, "_grid_rc", None) is None:
+        claimant = np.broadcast_to(np.asarray(claimant), self.O.shape)
+        # (worked out only where someone claims: a tile nobody claims is fine)
+        flat = claimant.ravel()
+        idx = np.flatnonzero(flat > 0)
+        ok = np.ones(self.O.size, dtype=bool)
+        if idx.size == 0:
+            return ok.reshape(self.O.shape)
+        who = flat[idx]
+        home = mass[who]
+        if getattr(self, "_coslat", None) is None:
             b = self.meta.get("bounds")              # (east-west degrees shrink away from the equator)
             lat = (b[3] - (np.arange(self.rows) + 0.5) * float(self.meta.get("res", 0.5))) if b else np.zeros(self.rows)
-            rr, col = np.indices(self.O.shape)
-            self._grid_rc = (rr.astype(np.float32), col.astype(np.float32),
-                             np.cos(np.radians(lat)).astype(np.float32)[:, None])
-        rr, col, coslat = self._grid_rc
-        dr = np.abs(rr - cr[claimant].astype(np.float32))
-        dc = np.abs(col - cc[claimant].astype(np.float32))
+            self._coslat = np.cos(np.radians(lat)).astype(np.float32)
+        coslat = self._coslat
+        rr, col = np.divmod(idx, self.cols)
+        dr = np.abs(rr - cr[who])
+        dc = np.abs(col - cc[who])
         if self.wrap:
             dc = np.minimum(dc, self.cols - dc)
-        dc = dc * coslat
+        dc = dc * coslat[rr]
         from civilization import jag
-        reach = HOME_REACH / float(self.meta.get("res", 0.5)) * (1.0 + HOME_RAGGED * jag(self) / 1.5)
+        reach = HOME_REACH / float(self.meta.get("res", 0.5)) * (1.0 + HOME_RAGGED * jag(self).ravel()[idx] / 1.5)
         near_capital = (dr * dr + dc * dc) <= reach * reach
-        ok = (home == 0) | ((S.landmass == home) & near_capital) | (self._near0 == claimant)
+        sub = (home == 0) | ((S.landmass.ravel()[idx] == home) & near_capital) | (self._near0.ravel()[idx] == who)
         # an overextended country (fracture.overextension) takes no more land that was another country's
         abroad = np.ones(n, dtype=bool)
         roots = np.arange(n)
@@ -483,9 +517,9 @@ class World:
             abroad[c.id] = getattr(c, "_abroad_ok", True)
             roots[c.id] = c.root if c.root is not None else c.id
         if not abroad.all():                               # (not a hard wall at its old borders: just slow)
-            o0 = self.O0
-            soft = (self.rng.random(o0.shape) < ABROAD_SOFT) if self.stochastic else False
-            ok = ok & (abroad[claimant] | (o0 == 0) | (o0 == claimant) | (o0 == roots[claimant]) | soft)
+            o0 = self.O0.ravel()[idx]
+            soft = (self.rng.random(idx.size) < ABROAD_SOFT) if self.stochastic else False
+            sub &= abroad[who] | (o0 == 0) | (o0 == who) | (o0 == roots[who]) | soft
         res = getattr(self, "colony_reserve", None)            # (a young colony's land: settlers.py)
         if res is not None and res.any():
             until = getattr(self, "reserve_until", {})
@@ -493,9 +527,13 @@ class World:
                 if self.ticks >= t or cid >= n or self.civs[cid].collapsed:
                     res[res == cid] = 0
                     until.pop(cid)
-            ok = ok & ((res == 0) | (res == claimant))
+            rv = res.ravel()[idx]
+            sub &= (rv == 0) | (rv == who)
         beach = getattr(self, "beach_map", None)               # (land around an overseas landing: expeditions.py)
-        return ok | (beach == claimant) if beach is not None else ok
+        if beach is not None:
+            sub |= beach.ravel()[idx] == who
+        ok[idx] = sub
+        return ok.reshape(self.O.shape)
 
     def _update_alarm(self):
         """The world finds out: once the outbreak is big (and no longer covered up) every government starts to mobilize

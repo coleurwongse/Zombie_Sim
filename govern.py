@@ -161,6 +161,7 @@ def nearest_city(world, region):
     return name
 
 
+NEAR_CITY = 15             # tiles: a region without a town of its own is named after a free one this close ...
 NAME_REACH = 3             # tiles: a city this close to a new state's land, nobody's, can still name it
 
 
@@ -189,15 +190,18 @@ def free_place(world, region, near=None):
     rr, cc = np.nonzero(region)
     if rr.size == 0:
         return None
-    realm = realm_place(world, region)                 # no town of its own: "East Rhun", after the land it was part of
-    if realm is not None and realm not in taken:
-        return realm
     r0, c0 = (near if near is not None else (float(rr.mean()), float(cc.mean())))
     live = np.zeros(len(world.civs), dtype=bool)       # (never a city another living government holds - no "Barad-dur
     for o in world.civs:                               #  Clans" in Rhun while Mordor stands)
         live[o.id] = bool(o.id and not o.collapsed)
     O = world.O
     pool = [(n, r, c) for n, r, c, _ in cities if n not in taken and not (0 <= O[r, c] < len(live) and live[O[r, c]])]
+    near_ = [x for x in pool if (x[1] - r0) ** 2 + (x[2] - c0) ** 2 <= NEAR_CITY ** 2]
+    if near_:                                          # (a town nearby nobody holds: the countryside round it)
+        return min(near_, key=lambda x: (x[1] - r0) ** 2 + (x[2] - c0) ** 2)[0]
+    realm = realm_place(world, region)                 # no town anywhere near: "East Rhun", after the land it was in
+    if realm is not None and realm not in taken:
+        return realm
     if not pool:
         return realm
     return min(pool, key=lambda x: (x[1] - r0) ** 2 + (x[2] - c0) ** 2)[0]
