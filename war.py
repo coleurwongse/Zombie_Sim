@@ -22,7 +22,8 @@ Fighting     every FIGHT_EVERY ticks: where the two touch, people die on both si
              every STRIKE_EVERY ticks - and strikes behind the front in a border war too.  Raids on towns, partisans
              in taken rough country and sea landings: warfare.py.  A long war wears morale down.
 Peace        after PEACE_MIN ticks either side may sue for peace (more likely as the war drags on);
-             a zombie emergency or a collapse ends it at once.
+             a zombie emergency or a collapse ends it at once.  A peace holds: the two don't go to war again for
+             PEACE_HOLDS days (TRUCE_HOLDS after a truce against the zombies) - wars don't flicker on and off.
 """
 import numpy as np
 
@@ -38,8 +39,8 @@ MIN_BORDER = 4            # border tiles needed for two nations to be in contact
 MIN_POP = 300
 SCARCE_FOOD_TICKS = 25    # food for fewer ticks than this counts as scarce
 SCARCE_MATERIALS = 8.0
-SCARCE_AT = 0.3
-DECLARE_BASE = 0.12       # per check, times scarcity and aggression
+SCARCE_AT = 0.2
+DECLARE_BASE = 0.25       # per check, times scarcity and aggression
 CRISIS = 0.6              # danger at which the zombies are the only war that matters ...
 CIVIL_CRISIS = 0.85       # ... (for a civil war: this desperate)
 PEACE_MIN = 40
@@ -63,10 +64,14 @@ STRIKE_COST = 4.0         # materials per strike
 STRIKE_MIN_ARMY = 0.25
 STRIKE_RANGE = 70         # tiles between capitals a strike can reach ...
 GLOBAL_REACH = 0.9        # ... unless the attacker's army is this strong (carriers, bombers, missiles)
-RIVAL_CHANCE = 0.003      # per check: old rivals go to war (x (1 + 3 x scarcity) x aggression)
+RIVAL_CHANCE = 0.01       # per check: old rivals go to war (x (1 + 3 x scarcity) x aggression)
 ROUGH_SAVES = 0.4          # defenders on rough ground (warfare.roughness) lose this much fewer ...
 ROUGH_HOLDS = 0.6          # ... and their ground is this much harder to take
-DISTANT_WEARY_EVERY = 45  # a war fought far away wears morale down much more slowly
+DISPUTE_CHANCE = 0.004     # per check, per pair of touching countries at peace with the zombies (x both aggressions):
+                           # a border dispute comes to blows
+DISTANT_WEARY_EVERY = 45
+PEACE_HOLDS = 365          # days after a peace before the same two go to war again ...
+TRUCE_HOLDS = 240          # ... after a truce against the zombies  # a war fought far away wears morale down much more slowly
 
 
 def key(a, b):
@@ -109,14 +114,23 @@ def allied(world, a, b):
     return x is not None and x == alliance(world, b)
 
 
-def declare(world, a, b, reason="", quiet=False, civil=False, join=True):
+def at_peace_until(world, a, b):
+    return world.__dict__.setdefault("truces", {}).get(key(a, b), -1)
+
+
+def declare(world, a, b, reason="", quiet=False, civil=False, join=True, truce_ok=False):
     k = key(a, b)
     if k in world.wars or allied(world, a, b):
         return
+    if not truce_ok and world.ticks < at_peace_until(world, a, b):
+        return                                            # (a peace holds for a while: PEACE_HOLDS)
+    crisis = CIVIL_CRISIS if civil else CRISIS
+    if world.ticks > 0 and (_danger(world.civs[a]) > crisis or _danger(world.civs[b]) > crisis):
+        return                                            # (it would only end in a truce against the zombies next day)
     world.wars[k] = dict(a=a, b=b, start=world.ticks, ticks=0, quiet=0, civil=civil)
     what = "CIVIL WAR" if civil else "WAR"
     verb = "fights" if civil else "attacks"
-    world.note(f"{what}: {world.civs[a].name} {verb} {world.civs[b].name}" + (f" ({reason})" if reason else ""))
+    world.war_note(f"{what}: {world.civs[a].name} {verb} {world.civs[b].name}" + (f" ({reason})" if reason else ""))
     if join and not civil:                                # (its pact partners stand by it)
         import globalaffairs
         for pk in list(globalaffairs.pacts(world)):
@@ -124,14 +138,15 @@ def declare(world, a, b, reason="", quiet=False, civil=False, join=True):
                 p = world.civs[next(iter(pk - {b}))]
                 if (p.ai and not p.collapsed and p.id != a and not at_war(world, p.id) and _danger(p) < 0.35
                         and not allied(world, p.id, a)):
-                    world.note(f"{p.name} stands by its pact with {world.civs[b].name}")
+                    world.war_note(f"{p.name} stands by its pact with {world.civs[b].name}")
                     declare(world, p.id, a, "its pact", join=False)
 
 
 def end(world, k, why):
     w = world.wars.pop(k)
+    world.__dict__.setdefault("truces", {})[k] = world.ticks + (TRUCE_HOLDS if "zombies" in why else PEACE_HOLDS)
     what = "civil war over" if w.get("civil") else "PEACE"
-    world.note(f"{what}: {world.civs[w['a']].name} and {world.civs[w['b']].name} ({why}) after {w['ticks']} ticks")
+    world.war_note(f"{what}: {world.civs[w['a']].name} and {world.civs[w['b']].name} ({why}) after {w['ticks']} ticks")
     if not w.get("civil") and why in ("armistice", "exhaustion"):          # (a war won outright: a satellite)
         import globalaffairs
         for win_id, n in w.get("captured", {}).items():
@@ -265,7 +280,8 @@ def _consider(world):
             if ca.id in k:
                 other = world.civs[next(iter(k - {ca.id}))]
                 if (other.ai and not other.collapsed and not at_war(world, other.id) and _danger(other) < 0.35
-                        and other.m and other.m.get("pop", 0) >= MIN_POP):
+                        and other.m and other.m.get("pop", 0) >= MIN_POP
+                        and world.ticks >= at_peace_until(world, ca.id, other.id)):
                     rival = other
         if rival is not None and world.pyrng.random() < (RIVAL_CHANCE * (1 + 3 * sc) * ca.traits["aggression"]
                                                          * govern.mod(ca, "aggression")):
@@ -278,12 +294,25 @@ def _consider(world):
             if cb.id == ca.id or at_war(world, cb.id) or _danger(cb) > CRISIS:
                 continue
             b = touching.get((min(ca.id, cb.id), max(ca.id, cb.id)), 0)
-            if b < MIN_BORDER or scarcity(cb) >= sc:
+            if b < MIN_BORDER or scarcity(cb) >= sc or world.ticks < at_peace_until(world, ca.id, cb.id):
                 continue                      # nothing to gain from someone just as poor
             options.append(cb)
         if options and world.pyrng.random() < DECLARE_BASE * sc * ca.traits["aggression"] * govern.mod(ca, "aggression"):
             cb = world.pyrng.choice(options)
             declare(world, ca.id, cb.id, "scarce " + ("food" if ca.famine or (ca.food or 0) < ca.food_use * SCARCE_FOOD_TICKS else "materials"))
+    # border disputes: neighbours at peace with the zombies fall out now and then
+    by_id = {c.id: c for c in live}
+    for (a, b), length in touching.items():
+        ca, cb = by_id.get(a), by_id.get(b)
+        if (ca is None or cb is None or length < MIN_BORDER or at_war(world, a) or at_war(world, b)
+                or _danger(ca) > 0.3 or _danger(cb) > 0.3 or allied(world, a, b)
+                or world.ticks < at_peace_until(world, a, b)):
+            continue
+        p = (DISPUTE_CHANCE * ca.traits.get("aggression", 1.0) * cb.traits.get("aggression", 1.0)
+             * govern.mod(ca, "aggression"))
+        if world.pyrng.random() < p:
+            att, dfn = (ca, cb) if world.pyrng.random() < 0.5 else (cb, ca)
+            declare(world, att.id, dfn.id, "a border dispute")
 
 
 def _pair_window(world, a, b, margin=2):
@@ -338,7 +367,7 @@ def _fight(world, w):
             w.setdefault("captured", {}).setdefault(win_c.id, 0)
             w["captured"][win_c.id] += int(take.sum())
             if world.ticks % (FIGHT_EVERY * 5) == 0:
-                world.note(f"{win_c.name} takes ground from {lose.name}")
+                world.war_note(f"{win_c.name} takes ground from {lose.name}", log=world.ticks % (FIGHT_EVERY * 15) == 0)
 
 
 def _strikes(world, w, min_army=STRIKE_MIN_ARMY):
@@ -374,6 +403,6 @@ def _strikes(world, w, min_army=STRIKE_MIN_ARMY):
         w["strikes"] = w.get("strikes", 0) + 1
         if w["strikes"] % 3 == 0:
             tgt.riot_hit += 1
-        if w["strikes"] % 10 == 1:
-            from fracture import _place
-            world.note(f"{att.name} strikes {_place(world, (r, c))} ({tgt.name}): {world.people(killed.sum())} dead")
+        from fracture import _place
+        world.war_note(f"{att.name} strikes {_place(world, (r, c))} ({tgt.name}): {world.people(killed.sum())} dead",
+                       log=w["strikes"] % 10 == 1)

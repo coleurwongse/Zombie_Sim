@@ -43,6 +43,9 @@ Files
   warfare.py         raids on towns, strikes, partisans in rough country, sea landings
   landuse.py         land changing with its people: fields cleared, suburbs and new towns built, cities ruined
   globalaffairs.py   expeditions abroad, reconstruction aid, pacts, proxy wars, tributaries, revolutions, conquest
+  motives.py         why countries act: security, instability, militarism, need, ambition
+  crime.py           organized crime: pirate fleets, smuggling cartels, paramilitaries, mercenaries, crime states
+  recovery.py        the recovery era: once the outbreak has burned out, new outbreaks are hunted down
   peace.py           standing down after the emergency, people going back to town
   restart.py         rebuilding: births, resettlement, pioneers, villages, annexing clean land, survivors founding states
   holdouts.py        besieged cities that barricade themselves       quarantine.py  shut borders
@@ -340,8 +343,10 @@ Global affairs (globalaffairs.py)
   the overlord falters.  A government in deep trouble (famine, morale broken, a long war - but not with the zombies
   at the gates) may fall to a revolution: a new form of government and a new name.  Strong aggressive countries go to
   war for land; organized states raid the villages nobody governs near them.
-  Raids, strikes, landings, partisans, expeditions, revolutions and tributes are marked on the map for a month
-  (x raid, o strike, ^ landing, o partisans, + expedition, o revolution, ^ tribute - the legend is at the top right).
+  Raids, strikes, landings, partisans, expeditions, revolutions, tributes, crime and refugee waves are marked on the
+  map for a month, each kind with a shape of its own (the key at the top right shows the ones on the map now, drawn
+  as they are on the map); marks where the zombies have since taken over are dropped.  Capitals are ringed dots in
+  their country's colour; a dashed gold line runs from each tributary to its overlord ('T' in the country list).
 
 Recovery and holding ground
   A government doesn't resettle land while it's under attack (danger above 0.25, its outbreak growing, people being
@@ -354,3 +359,45 @@ Recovery and holding ground
   country that has come through an outbreak and stood down mobilizes five times as fast the next time zombies turn
   up in its region (front.VETERAN_ALERT): a late horde is met, not ignored until it's continent-sized.
   A state with no town of its own is named after a free town nearby (within 15 tiles) before "North Somewhere".
+
+Sieges, expeditions, exodus, war log
+  People behind fortress walls (defense 7+) are hardly prey for a horde (hordes.FORT_VALUE): it goes for people it
+  can reach, and only sits down before a garrison when there's nothing better in range; zombies outside the walls
+  aren't 'busy attacking', and a garrison doesn't anchor an occupation.
+  Expeditionary forces go where they can win - a city whose horde isn't beyond the sender's army (CORPS_MAX_Z), small
+  hordes near survivors first - and set up where the zombies are thinnest nearby (the staging point on the map).
+  Mass exodus (people.EXODUS_*): a country in serious danger or famine sees the people of its border districts flee
+  into a clearly safer, fed neighbour it isn't at war with - unrest where they arrive, the crossing points' defenses
+  worn down, some of them bitten; a shut border turns most back but is still pressed.  'across borders' in the
+  dashboard counts them.
+  Wars are more common: scarcity wars, old rivals, conquest, and border disputes between neighbours at peace with the
+  zombies (war.DISPUTE_CHANCE).
+  The dashboard has a 'war & world affairs' section (world.war_log): every war, raid, strike, landing, partisan
+  action, expedition, pact, tribute, revolution and proxy deal - the main log below carries only the bigger ones.
+
+Motives, crime and the endgame
+  What a country does abroad follows from its state (motives.py): secure countries with an expansionist temper (or a
+  junta's) send expeditions - and, if they came to expand, plant a colony where they cleared - and wage wars of
+  conquest; unstable ones (morale breaking, famine, riots, a war going badly, foreign rule, a shaky regime) have
+  revolutions; militarist and hungry ones raid towns at war and villages nobody governs (over land only).  Tributaries
+  resent paying: when the overlord falters or they grow strong they stop - and the overlord makes war on them if it
+  can (else the two are rivals).  A peace holds for a year (a truce against the zombies, 240 days): wars don't
+  flicker on and off.
+  Organized crime (crime.py) grows where governments fail - in big stretches of anarchy the zombies have left, or in
+  states coming apart: pirate fleets raiding coasts across the sea and preying on shipping, cartels smuggling food
+  into hungry countries at a price, stealing from rich ones and trafficking people past shut borders, militias
+  ambushing a failing state's soldiers and taking its districts.  Strong rings hire out as mercenaries to countries at
+  war.  Secure countries with armies crack down; hordes finish them too.  A ring that gets strong and rich enough
+  becomes a criminal state of its own (government 'syndicate', S in the list): a pirate republic, a cartel state, a
+  militia's territory.  Their bases are black diamonds on the map; 'crime rings' in the dashboard counts them.
+  The endgame: once the hordes have long left a stretch of country, people who hid out the outbreak there come out
+  (restart.EMERGE_*) - villages across the land the zombies took.  Villages that grow full become towns; villages a
+  few tiles apart organize together into a local government; small new states band together in peacetime into
+  regional states (union.FEDERATE) and those into nations.  A state founded since the outbreak reaches only as far as
+  its people can govern (sim.REACH_FULL / REACH_MIN): a free city that held out runs its region, not the continent.
+  New towns go where towns make sense (the coast, old ruins, by the hills, good land), a couple at a time, at
+  irregular distances, with ragged footprints; suburbs grow unevenly.
+  The recovery era (recovery.py): once the zombies are down to a quarter of their peak (after day 250), everybody has
+  learned how to fight them - fewer bites, more of them killed where they meet people, townsfolk and villagers hunting
+  down any pack within a few tiles, every government mobilizing like a veteran.  Small outbreaks still happen; a
+  second fall of a continent doesn't.

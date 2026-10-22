@@ -25,6 +25,8 @@ import resolve
 import spread
 import landuse
 import globalaffairs
+import crime
+import recovery
 import crossings
 import settlers
 import front
@@ -45,6 +47,10 @@ LAPSE_EVERY = 10        # ... losing one level this often (a fallen country's wa
 OVERSEAS_REACH = 6      # away from the landmass of its capital a government only takes land this close to what it held
                         # at the start (an overseas territory doesn't annex the continent it sits on) ...
 HOME_REACH = 25.0       # ... and on its own landmass, beyond that, only within about this many degrees of its capital
+REACH_FULL = 8.0        # (a state founded since the outbreak reaches that far with REACH_FULL x an average government's
+REACH_MIN = 0.12        #  people (pop_ref); a smaller one less far, x sqrt(its people / that), never less than REACH_MIN: a
+                        #  free city that survived the outbreak governs its region, not the continent - the land beyond
+                        #  is left to villages and new states of its own (restart.py))
 WILD_H0 = 10            # wilderness: land that held at most this many people a tile (+ up to WILD_SLACK in harsh
 WILD_SLACK = 10         #   country, varying from place to place)
 ABROAD_SOFT = 0.15      # an overextended country (fracture.ABROAD_*) still takes others' land, this much as often
@@ -108,6 +114,7 @@ class World:
         self.civs = [Civilization(k, ai=ai, traits=self._traits() if k else None)
                      for k in range(int(self.O.max(initial=1)) + 1)]
         self.events = deque(maxlen=5000)          # (tick, text)
+        self.war_log = deque(maxlen=500)          # (tick, text): wars and world affairs (war_note)
         self.closed = set()                      # civilizations with shut borders
         self.qfac = None
         self.wars = {}
@@ -272,6 +279,15 @@ class World:
     def note(self, text):
         self.events.append((self.ticks, text))
 
+    def war_note(self, text, log=True):
+        """Wars and world affairs - raids, strikes, landings, partisans, expeditions, pacts, revolutions: kept in their
+        own log (the dashboard's 'war & world affairs' section, every one of them), and in the main log too (`log`)."""
+        if getattr(self, "war_log", None) is None:
+            self.war_log = deque(maxlen=500)
+        self.war_log.append((self.ticks, text))
+        if log:
+            self.events.append((self.ticks, text))
+
     def refresh_wild(self):
         """Work out self.wild from self.H0 (call again if H0 is changed)."""
         from civilization import jag
@@ -385,6 +401,8 @@ class World:
             holdouts.step(self)
             aid.step(self)
             globalaffairs.step(self)
+            crime.step(self)
+            recovery.step(self)
             expeditions.step(self)
             peace.step(self)
             resolve.step(self)
@@ -482,10 +500,15 @@ class World:
         n = len(self.civs)
         mass = np.zeros(n, dtype=np.int64)
         cr, cc = np.zeros(n), np.zeros(n)
+        scale = np.ones(n)
+        full = REACH_FULL * getattr(self, "pop_ref", 1.0)
         for c in self.civs:
             if c.capital is not None and c.id:
                 mass[c.id] = S.landmass[c.capital]
                 cr[c.id], cc[c.id] = c.capital
+                if c.successor:                          # (a state founded since the outbreak: by its people)
+                    pop = c.m.get("pop", 0) if c.m else 0
+                    scale[c.id] = min(1.0, max(REACH_MIN, (pop / full) ** 0.5))
         claimant = np.broadcast_to(np.asarray(claimant), self.O.shape)
         # (worked out only where someone claims: a tile nobody claims is fine)
         flat = claimant.ravel()
@@ -507,7 +530,8 @@ class World:
             dc = np.minimum(dc, self.cols - dc)
         dc = dc * coslat[rr]
         from civilization import jag
-        reach = HOME_REACH / float(self.meta.get("res", 0.5)) * (1.0 + HOME_RAGGED * jag(self).ravel()[idx] / 1.5)
+        reach = (HOME_REACH / float(self.meta.get("res", 0.5)) * scale[who]
+                 * (1.0 + HOME_RAGGED * jag(self).ravel()[idx] / 1.5))
         near_capital = (dr * dr + dc * dc) <= reach * reach
         sub = (home == 0) | ((S.landmass.ravel()[idx] == home) & near_capital) | (self._near0.ravel()[idx] == who)
         # an overextended country (fracture.overextension) takes no more land that was another country's

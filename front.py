@@ -86,7 +86,7 @@ def strengths(world):
         if world.ticks < c.traits.get("denial", 0):
             threat = False                                 # a cover-up: officially, nothing is happening
         # (a country that has been through an outbreak and stood down mobilizes fast the next time: peace.py)
-        rate = ALERT_RATE * (1.0 + VETERAN_ALERT * bool(getattr(c, "veteran", False)))
+        rate = ALERT_RATE * (1.0 + VETERAN_ALERT * bool(getattr(c, "veteran", False) or world.__dict__.get("era", 0) >= 0.5))
         c.alert = min(1.0, c.alert + rate) if threat else max(0.0, c.alert - ALERT_FADE)
         if world.ticks >= c.traits.get("denial", 0):
             c.alert = max(c.alert, ALARM_ALERT * getattr(world, "alarm", 0.0))

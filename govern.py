@@ -13,6 +13,8 @@ political tradition of its old country first, then what it breaks away from, the
              very aggressive, rarely merges.
   tribal     clans / councils.  Grows out of thinly populated countryside.  Self-sufficient in food, little industry,
              small army, very resilient morale, little unrest (few cities to riot in).
+  syndicate  a criminal proto-state (crime.py: pirates, a cartel, a militia that took over).  Never chosen for a new
+             state: a crime ring becomes one.  Strong army, trades well, unruly, very aggressive, hardly ever merges.
 
 Every modifier is a multiplier (1.0 = like a national government).
 """
@@ -26,9 +28,11 @@ GOV = {
     "democracy": (1.08, 1.12, 0.80, 1.00, 1.40, 1.00, 0.60, 1.40),
     "warlord":  (0.85, 0.80, 1.30, 1.25, 0.90, 1.30, 1.80, 0.50),
     "tribal":   (1.15, 0.50, 0.70, 0.60, 1.00, 0.50, 0.90, 0.70),
+    "syndicate": (0.90, 1.15, 1.40, 1.10, 0.90, 1.20, 1.60, 0.30),
 }
 KEYS = ("food", "materials", "army", "morale_loss", "recover", "unrest", "aggression", "merge")
-LABEL = {"national": "", "junta": "junta", "democracy": "republic", "warlord": "warlords", "tribal": "clans"}
+LABEL = {"national": "", "junta": "junta", "democracy": "republic", "warlord": "warlords", "tribal": "clans",
+         "syndicate": "criminal state"}
 
 
 def mod(civ, key):
@@ -251,10 +255,10 @@ def state_name(world, gov, region, civ_id, parent=None, near=None):
         world.civs[civ_id].place = place
     if place is None:
         base = {"junta": "Junta", "democracy": "Republic", "warlord": "Warlords", "tribal": "Clans",
-                "national": "State"}[gov]
+                "national": "State", "syndicate": "Syndicate"}[gov]
         return f"{base} {civ_id}"
     base = {"junta": f"{place} Junta", "democracy": f"Republic of {place}", "warlord": f"{place} Warlords",
-            "tribal": f"{place} Clans", "national": f"Free {place}"}[gov]
+            "tribal": f"{place} Clans", "national": f"Free {place}", "syndicate": f"Syndicate of {place}"}[gov]
     live = {c.name for c in world.civs if not c.collapsed}
     name, k = base, 0
     ordinals = ("Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh")

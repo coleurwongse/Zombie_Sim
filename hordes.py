@@ -53,6 +53,8 @@ OCCUPY_Z = 40              # ... keeps its zombies: tiles with fewer than this d
                            # starve: resolve.py) - so the people can't just walk back in behind the horde ...
 OCCUPY_MASS = 1500         # ... while the zombies there are a real force (this many within OCCUPY_REACH): a few
                            # leftovers starve as before, and don't smoulder on to start the outbreak again later
+FORT_WALL = 7              # defense of a standing fortification (the zombies can't get in) ...
+FORT_VALUE = 0.05          # ... the people behind it count this much as prey
 ENGAGED = 2                # tiles within this many of people don't march on: they're attacking
 COORD_DAMP = 0.75          # engine.SPREAD x (1 - this x coordination)
 NOTE_MIN = 3000            # hordes this big are reported when they turn on a new city
@@ -119,6 +121,9 @@ def plan(world):
     wrap = bool(world.wrap)
     from civilization import protection
     H = np.maximum(world.H, 0)
+    # (people behind fortress walls - a garrison, a barricaded city - are hardly prey: the horde can't get at them;
+    #  it goes for people it can reach, and only sits down before a fortress when there's nothing else)
+    H = np.where(world.D >= FORT_WALL, H * FORT_VALUE, H)
     Hc = coarse_sum(world, H, k)
     cityc = coarse_sum(world, np.where(H >= CITY_POP, H, 0), k)
     prot = np.maximum(coarse_sum(world, np.clip(protection(world), 0, 10), k) / landc - BASE_DEFENSE, 0.0)
@@ -249,7 +254,7 @@ def march(world):
     Z = world.Z
     # (zombies at people - on them or next to them - are busy eating: they attack, the hunt moves them; zombies.py)
     from civilization import box_sum
-    engaged = box_sum(world.H > 10, ENGAGED) > 0
+    engaged = box_sum((world.H > 10) & (world.D < FORT_WALL), ENGAGED) > 0     # (not outside a fortress wall)
     rr, cc = np.nonzero((Z >= HORDE_Z) & world.statics.land & ~engaged & ~occupying(world))
     if rr.size == 0:
         return 0
@@ -296,7 +301,7 @@ def occupied(world):
     if h0 is None:
         out = np.zeros(world.H.shape, dtype=bool)
     else:
-        out = ((h0 > 10) & (world.H <= 10) & (box_sum(world.H > 10, OCCUPY_REACH) > 0)
+        out = ((h0 > 10) & (world.H <= 10) & (box_sum((world.H > 10) & (world.D < FORT_WALL), OCCUPY_REACH) > 0)
                & (world.zombie_near(OCCUPY_REACH) >= OCCUPY_MASS))
     world._occupied = (world.ticks, out)
     return out

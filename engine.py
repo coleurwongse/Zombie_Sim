@@ -287,6 +287,10 @@ class _Grid:
         self.qheavy = qheavy
         meta = getattr(world, "meta", None) or {}
         self.virulence = getattr(world, "virulence", 1.0) * float(meta.get("virulence_scale", 1.0))
+        import recovery                                  # (the recovery era: people know how to fight them)
+        e = recovery.era(world)
+        self.bite_mult = np.float32(1.0 - recovery.WARY_BITE * e)
+        self.kill_mult = np.float32(1.0 + recovery.WARY_KILL * e)
         import hordes                                    # (organized hordes don't drift apart: hordes.COORD_DAMP)
         self.spread = np.float32(SPREAD * (1.0 - hordes.COORD_DAMP * hordes.coordination(world)))
         self.shut = None
@@ -314,12 +318,12 @@ def _bites(g, h, z, share):
     if i.size == 0:
         return
     hi, zi, dd = h[i], z[i], g.dd[i]
-    k = np.where(g.O[i] == 0, g.unorg[0], 1.0).astype(np.float32) * share * g.virulence
+    k = np.where(g.O[i] == 0, g.unorg[0], 1.0).astype(np.float32) * share * g.virulence * g.bite_mult
     j1, j2 = g.jitter(i.size), g.jitter(i.size)
     mnt, hil = g.mountain[i], g.highlands[i]
     hz = hi * zi / dd
     bite = np.floor(hz / np.where(mnt, 255.0, np.where(hil, 140.0, 80.0)) * k * j1)
-    kill = np.floor(zi / np.where(mnt, 20.0, np.where(hil, 90.0, 255.0)) * dd * dd * j2 * share)
+    kill = np.floor(zi / np.where(mnt, 20.0, np.where(hil, 90.0, 255.0)) * dd * dd * j2 * share * g.kill_mult)
     no = mnt & (hi <= 10)                                   # (the mountain rule needs more than 10 people)
     bite[no] = 0
     kill[no] = 0

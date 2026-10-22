@@ -1,8 +1,8 @@
 """How wars are fought, beyond the border battles of war.py.
 
 Raids        a war party strikes an enemy town near the front (within RAID_REACH tiles of its own land): people are
-             killed, food and materials carried off, its defenses battered (RAID_*).  The bolder the government, the
-             more often.
+             killed, food and materials carried off, its defenses battered (RAID_*).  Militarist regimes (juntas,
+             warlords) and sides short of food and materials raid most (motives.py).
 Strikes      artillery and air strikes on enemy towns in range don't stop because the two share a border
              (FRONT_STRIKE_EVERY: war.py's strikes, which before only distant wars used).
 Guerrillas   ground a country has taken in rough country - forest, hills, mountains, marsh, jungle - doesn't stay
@@ -18,7 +18,7 @@ from civilization import box_sum
 from terrain import PROTECTION, is_land
 
 RAID_EVERY = 8
-RAID_CHANCE = 0.35         # per check, per side able to (x aggression)
+RAID_CHANCE = 0.5          # per check, per side able to (x (militarism + need), motives.py)
 RAID_ARMY = 0.3
 RAID_REACH = 18            # tiles from its own land
 RAID_KILL = 0.12           # share of the people in the 3x3 block killed
@@ -69,7 +69,9 @@ def _able(c, army):
 
 
 def _raid(world, w, att, tgt):
-    if not _able(att, RAID_ARMY) or world.pyrng.random() >= RAID_CHANCE * att.traits.get("aggression", 1.0):
+    import motives
+    if not _able(att, RAID_ARMY) or world.pyrng.random() >= RAID_CHANCE * min(1.0, motives.militarism(att)
+                                                                               + motives.need(att)):
         return
     import war
     win = war._pair_window(world, att.id, tgt.id, RAID_REACH + 1)
@@ -99,10 +101,9 @@ def _raid(world, w, att, tgt):
     rr, cc = r + (win[0].start or 0), c + (win[1].start or 0)
     import globalaffairs
     globalaffairs.mark(world, rr, cc, "raid")
-    if w["raids"] % 2 == 1:
-        from fracture import _place
-        world.note(f"{att.name} raids {_place(world, (rr, cc))} ({tgt.name}): {world.people(killed.sum())} dead, "
-                   f"stores carried off")
+    from fracture import _place
+    world.war_note(f"{att.name} raids {_place(world, (rr, cc))} ({tgt.name}): {world.people(killed.sum())} dead, "
+                   f"stores carried off", log=w["raids"] % 2 == 1)
 
 
 def _guerrillas(world, w):
@@ -137,9 +138,9 @@ def _guerrillas(world, w):
             r, c = divmod(int(idx[back][0]), world.cols)
             import globalaffairs
             globalaffairs.mark(world, r, c, "partisan")
-            if w["guerrilla"] - int(back.sum()) < 3 <= w["guerrilla"] or world.pyrng.random() < 0.15:
-                from fracture import _place
-                world.note(f"partisans drive {occ.name} out of {_place(world, (r, c))} ({orig.name} takes it back)")
+            from fracture import _place
+            world.war_note(f"partisans drive {occ.name} out of {_place(world, (r, c))} ({orig.name} takes it back)",
+                           log=w["guerrilla"] - int(back.sum()) < 3 <= w["guerrilla"] or world.pyrng.random() < 0.15)
 
 
 def _landing(world, w, att, tgt):
@@ -182,4 +183,4 @@ def _landing(world, w, att, tgt):
     from fracture import _place
     import globalaffairs
     globalaffairs.mark(world, r, c, "landing")
-    world.note(f"{att.name} lands troops at {_place(world, (r, c))} ({tgt.name}): a beachhead of {n} districts")
+    world.war_note(f"{att.name} lands troops at {_place(world, (r, c))} ({tgt.name}): a beachhead of {n} districts")

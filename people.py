@@ -76,6 +76,17 @@ EVAC_CHANCE = 0.75
 EVAC_SAFE_NEAR = 40        # a safe destination has fewer zombies than this within EVAC_LOOK
 EVAC_RANGE = 40
 EVAC_REFRESH = 4
+EXODUS_EVERY = 5           # mass exodus: every this many days the people of a country in trouble ...
+EXODUS_DANGER = 0.45       # ... (danger at least this, or famine) ...
+EXODUS_SAFER = 0.2         # ... flee into a neighbour at least this much safer (and fed), not at war with it:
+EXODUS_REACH = 8           # those within this many tiles of the border,
+EXODUS_SHARE = 0.10        # this share of them per round (x how bad it is),
+EXODUS_INTO = 3            # onto its lived-on land within this many tiles of the border.
+EXODUS_CLOSED = 0.3        # A shut border lets this share through ...
+EXODUS_PRESS = 1           # ... and the crowds at the crossing points knock its defenses down by this (either way)
+EXODUS_UNREST = 0.4        # unrest added where they arrive (x arrivals / residents)
+EXODUS_NOTE = 150          # (waves this big are told of in the log - once in a while per pair of countries)
+EXODUS_BITTEN = 0.08       # share of the refugees bitten (x how exposed the people they left were) - they turn there
 NO_GOVERNMENT_MORALE = 3   # how much restraint a tile with no civilization has
 
 
@@ -282,6 +293,74 @@ def stragglers(world):
     return moved
 
 
+def exodus(world):
+    """Mass exodus across international borders (EXODUS_*): returns how many fled."""
+    import war
+    civs = world.civs
+    closed = getattr(world, "closed", set()) or set()
+    total = 0
+    H, O, D, Z = world.H, world.O, world.D, world.Z
+    for (a, b), length in war.contacts(world).items():
+        for src, dst in ((civs[a], civs[b]), (civs[b], civs[a])):
+            if not (src.ai and dst.ai and not src.collapsed and not dst.collapsed and src.m and dst.m
+                    and src.m.get("n") and dst.m.get("n")) or war.key(src.id, dst.id) in world.wars:
+                continue
+            ds = 1.0 if src.famine else src.danger(src.m)[0]
+            dd = 1.0 if dst.famine else dst.danger(dst.m)[0]
+            if max(ds, 1.0 if src.famine else 0.0) < EXODUS_DANGER or dd > ds - EXODUS_SAFER:
+                continue
+            win = war._pair_window(world, src.id, dst.id, EXODUS_REACH + 1)
+            Hw, Ow, Dw, Zw = H[win], O[win], D[win], Z[win]
+            theirs, mine = Ow == dst.id, Ow == src.id
+            leave = mine & (Hw > 20) & (Zw * 2 < Hw) & (box_sum(theirs, EXODUS_REACH) > 0)
+            arrive = theirs & (Hw > 10) & (box_sum(mine, EXODUS_INTO) > 0)
+            if not leave.any() or not arrive.any():
+                continue
+            share = EXODUS_SHARE * min(1.0, (ds - EXODUS_SAFER) * 2.0)
+            go = np.where(leave, np.floor(Hw * share), 0).astype(np.int64)
+            n = int(go.sum())
+            if n <= 0:
+                continue
+            shut = dst.id in closed
+            through = int(n * (EXODUS_CLOSED if shut else 1.0))
+            ar, ac = np.nonzero(arrive)
+            Dw[ar, ac] = np.maximum(Dw[ar, ac] - EXODUS_PRESS, 1)          # (checkpoints overwhelmed)
+            if through <= 0:
+                continue
+            go = np.floor(go * (through / n)).astype(np.int64)
+            room = np.maximum(255 - Hw[ar, ac].astype(np.int64), 0)
+            if room.sum() <= 0:
+                continue
+            through = min(int(go.sum()), int(room.sum()))
+            go = np.floor(go * (through / max(int(go.sum()), 1))).astype(np.int64)
+            through = int(go.sum())
+            Hw -= go.astype(Hw.dtype)
+            put = np.floor(room * (through / room.sum())).astype(np.int64)
+            put[0] += through - int(put.sum())
+            bitten = np.floor(put * EXODUS_BITTEN * min(1.0, src.m.get("pop_exposure", 0.0) * 3 + 0.2)).astype(np.int64)
+            Hw[ar, ac] += (put - bitten).astype(Hw.dtype)
+            Zw[ar, ac] = np.minimum(Zw[ar, ac] + bitten, 255).astype(Zw.dtype)
+            U = getattr(world, "U", None)
+            if U is not None:
+                Uw = U[win]
+                Uw[ar, ac] += EXODUS_UNREST * put / np.maximum(Hw[ar, ac], 1)
+            total += through
+            if through >= EXODUS_NOTE:
+                noted = world.__dict__.setdefault("_exodus_noted", {})
+                if world.ticks - noted.get((src.id, dst.id), -10 ** 6) >= 60:
+                    noted[(src.id, dst.id)] = world.ticks
+                    why = "famine" if src.famine else "the zombies"
+                    world.note(f"{world.people(through)} people flee {why} in {src.name} across the border into "
+                               f"{dst.name}" + (" - past its shut border" if shut else ""))
+                    marked = world.__dict__.setdefault("_exodus_marked", {})
+                    if through >= 3 * EXODUS_NOTE and world.ticks - marked.get(src.id, -10 ** 6) >= 60:
+                        marked[src.id] = world.ticks                # (the map: a country's big waves, now and then)
+                        import globalaffairs
+                        globalaffairs.mark(world, int(ar[0] + (win[0].start or 0)), int(ac[0] + (win[1].start or 0)),
+                                           "refugees")
+    return total
+
+
 def step(world):
     H, D, T, O = world.H, world.D, world.T, world.O
     near = world.zombie_near(NEAR_RADIUS)
@@ -301,6 +380,8 @@ def step(world):
         if world.ticks % 2 == 0:                  # (mass evacuations every other tick - half the work)
             world.last_evac = mass_evacuation(world)
         world.last_refugees = refugees(world)
+        if world.ticks % EXODUS_EVERY == 0:
+            world.last_exodus = exodus(world)
         if world.ticks % STRAY_EVERY == 0:
             world.last_strays = stragglers(world)
     else:

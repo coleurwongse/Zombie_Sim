@@ -1413,6 +1413,134 @@ def main():
     kept = int(w.Z[25:45, 10:25].sum())
     assert kept >= 0.8 * z0, (kept, z0)
     print("94 zombies holding taken land near a town: %d of %d stayed" % (kept, z0))
+    # 95. Motives: a stable, secure country never has a revolution; one coming apart (riots, famine, morale broken)
+    #     does - and a secure, ambitious one is the one that looks abroad.
+    import motives, globalaffairs
+    def revolts(unstable):
+        H, Z, D, T, O, A = blank(40, humans=100)
+        w = sim.World(H, Z, D, T, O, A, seed=7, stochastic=True, meta={"wrap": False, "res": 0.5})
+        w.tick(); c = w.civs[1]
+        for k in range(60):
+            if unstable:
+                c.morale, c.famine = 2, True
+                w.U[:, :] = 1.5
+            w.ticks = (k + 1) * globalaffairs.EVERY
+            motives.update(w)
+            globalaffairs._revolutions(w, [c])
+        return sum(1 for _, e in w.war_log if "REVOLUTION" in e), motives.instability(c)
+    (calm_n, calm_i), (bad_n, bad_i) = revolts(False), revolts(True)
+    assert calm_n == 0 and bad_n >= 1 and bad_i > calm_i, (calm_n, calm_i, bad_n, bad_i)
+    H, Z, D, T, O, A = blank(40, humans=100)
+    w = DW(H, Z, D, T, O, A); w.tick(); c = w.civs[1]
+    c.military, c.materials, c.morale = 0.9, 200.0, 9
+    c.gov, c.traits["aggression"] = "junta", 1.3
+    amb_junta = motives.ambition(w, c)
+    c.gov, c.traits["aggression"], c.military = "democracy", 0.8, 0.4
+    amb_rep = motives.ambition(w, c)
+    assert amb_junta > amb_rep, (amb_junta, amb_rep)
+    print("95 revolutions: %d in a stable country (instability %.2f), %d in one coming apart (%.2f); ambition: "
+          "secure junta %.2f vs cautious republic %.2f" % (calm_n, calm_i, bad_n, bad_i, amb_junta, amb_rep))
+    # 96. A peace holds: two countries that just made peace don't go to war again straight away.
+    H, Z, D, T, O, A = blank(40, humans=100); O[:, 20:] = 2
+    w = DW(H, Z, D, T, O, A); w.tick()
+    war.declare(w, 1, 2, "test"); war.end(w, war.key(1, 2), "truce against the zombies")
+    war.declare(w, 1, 2, "again")
+    assert war.key(1, 2) not in w.wars
+    w.ticks += war.TRUCE_HOLDS + 1
+    war.declare(w, 1, 2, "later")
+    assert war.key(1, 2) in w.wars
+    print("96 no new war within %d days of a truce; war again after it" % war.TRUCE_HOLDS)
+    # 97. Organized crime: pirates take root in coastal anarchy and raid a country's coast across the water;
+    #     a strong, secure country cracks down.
+    import crime
+    H, Z, D, T, O, A = blank(60, humans=120, owner=0)
+    T[:, 25:35] = 0; H[:, 25:35] = 0                        # (a strait)
+    O[:, 35:] = 1
+    w = sim.World(H, Z, D, T, O, A, seed=11, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.cities = [("Tortuga", 30, 23, 1.0), ("Port Royal", 30, 40, 1.0)]
+    w.tick()
+    for c in w.civs[1:]: c.next_decision = 10 ** 9
+    crime.ROOT_CHANCE, keep = 1.0, crime.ROOT_CHANCE
+    try:
+        w.ticks = 40
+        crime.step(w)
+    finally:
+        crime.ROOT_CHANCE = keep
+    g = crime.active(w)
+    assert g and g[0]["kind"] in ("pirates", "cartel", "paramilitary"), g
+    g = g[0]; g["kind"], g["strength"] = "pirates", 0.8
+    h0 = int(w.H[:, 35:].sum())
+    crime._piracy(w, g)
+    assert int(w.H[:, 35:].sum()) < h0 and any("PIRATES" in e for _, e in w.war_log)
+    c = w.civs[1]; c.military, c.morale = 1.0, 10; c.strength = 1.0
+    g["victims"] = {1: w.ticks}
+    for _ in range(40):
+        if not g["alive"]:
+            break
+        crime._crackdown(w, g)
+    assert not g["alive"], g
+    print("97 the %s took root in the anarchy, raided across the strait, and were crushed in a crackdown" % g["name"])
+    # 98. Hidden survivors: once the hordes have long left, people come out of hiding on the emptied land - villages.
+    H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+    w = sim.World(H, Z, D, T, O, A, seed=2, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.H0[:, :] = 80
+    for k in range(30):
+        w.ticks = restart.EMERGE_START + k * restart.EMERGE_EVERY
+        restart.emerge(w)
+    out = int((w.H > 0).sum())
+    assert out >= 20 and getattr(w, "emerged", 0) > 0, out
+    w2 = sim.World(*blank(60, humans=0, owner=0), seed=2, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w2.H0[:, :] = 80; w2.Z[30, 30] = 5
+    for k in range(30):
+        w2.ticks = restart.EMERGE_START + k * restart.EMERGE_EVERY
+        restart.emerge(w2)
+    near = int((w2.H[24:37, 24:37] > 0).sum())
+    assert near == 0, near
+    print("98 %d hiding places came out once the land was quiet (none within reach of a zombie)" % out)
+    # 99. The recovery era: once the outbreak has burned out, a fresh outbreak in a town is hunted down.
+    import recovery
+    def late(era):
+        H, Z, D, T, O, A = blank(40, humans=120)
+        w = sim.World(H, Z, D, T, O, A, seed=3, stochastic=True, meta={"wrap": False, "res": 0.5})
+        w.tick()
+        for c in w.civs[1:]: c.next_decision = 10 ** 9
+        w.Z[20, 20] = 40
+        w.era = era
+        for _ in range(30):
+            w.era = era
+            recovery._militia(w, era) if era else None
+            w.tick()
+            w.era = era
+        return int(w.Z.sum())
+    z_then, z_now = late(0.0), late(1.0)
+    assert z_now < 0.5 * max(z_then, 1), (z_then, z_now)
+    print("99 a fresh outbreak in a town: %d zombies after a month mid-outbreak, %d in the recovery era" % (z_then, z_now))
+    # 100. New towns: on the best sites (the coast), irregular footprints - not a lattice of single tiles.
+    H, Z, D, T, O, A = blank(60, humans=110)
+    T[:, :3] = 0; H[:, :3] = 0; O[:, :3] = 0                 # (a coast on the west)
+    w = sim.World(H, Z, D, T, O, A, seed=4, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick(); w.civs[1]._worst_damage = 0.5
+    built0 = (w.T == TS) | (w.T == TU)
+    keep = landuse.TOWN_CHANCE
+    landuse.TOWN_CHANCE = 1.0
+    try:
+        towns = landuse._new_towns(w, (w.T == TG) & (w.O == 1), built0, np.array([False, True]), landuse.home(w))
+    finally:
+        landuse.TOWN_CHANCE = keep
+    rr, cc = np.nonzero(towns)
+    assert 1 <= rr.size <= landuse.TOWN_MAX * landuse.TOWN_TILES[1] and cc.min() <= 6, (rr, cc)
+    print("100 new towns at %s (on the coast), %d tiles" % (sorted(set(zip(rr.tolist(), cc.tolist())))[:3], rr.size))
+    # 101. Small states founded since the outbreak reach only their own region; big ones further.
+    H, Z, D, T, O, A = blank(100, humans=0, owner=0)
+    H[48:52, 48:52] = 100; O[48:52, 48:52] = 1
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick(); c = w.civs[1]; c.successor = True; c.capital = (50, 50)
+    w.pop_ref = 100000.0
+    small_reach = int(w.may_claim(np.full((100, 100), 1)).sum())
+    w.pop_ref = 100.0
+    big_reach = int(w.may_claim(np.full((100, 100), 1)).sum())
+    assert small_reach < big_reach, (small_reach, big_reach)
+    print("101 a small new state may claim %d tiles, a big one %d" % (small_reach, big_reach))
     print("all civ tests passed")
 
 

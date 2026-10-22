@@ -16,7 +16,10 @@ REACH = 2                  # tiles apart that still count as neighbours
 MIN_CONTACT = 3            # border / near-border tile pairs needed
 KIN_CHANCE = 0.1           # per check, fragments of one former country
 STRANGER_CHANCE = 0.03     # per check, unrelated colonies
-CALM_MERGE = 0.3           # x this when neither faces zombies: in peacetime, states settle down as they are
+CALM_MERGE = 0.3           # x this when neither faces zombies: in peacetime, states settle down as they are ...
+FEDERATE = 2.5             # ... except small new states (both founded since the outbreak, together under FEDERATE_POP x
+FEDERATE_POP = 1.5         # an average government's people): village councils and city-states band together into
+                           # regional states, and those into nations, once the zombies are gone
 MERGE_MAX_KIN = 1.2        # a merger never makes a country bigger than this x its former country's populated land ...
 MERGE_MAX_TILES = 600      # ... or, for unrelated states, than this many populated tiles (no supercountries by merger)
 MERGE_MORALE_BONUS = 1
@@ -117,8 +120,10 @@ def step(world):
         if too_big(world, ca, cb):
             continue                               # (that would be too big to hold together)
         p = (KIN_CHANCE if kin else STRANGER_CHANCE) * govern.mod(ca, "merge") * govern.mod(cb, "merge")
+        small = (ca.successor and cb.successor and (ca.m.get("pop", 0) if ca.m else 0)
+                 + (cb.m.get("pop", 0) if cb.m else 0) < FEDERATE_POP * getattr(world, "pop_ref", 1e9))
         if not (_fighting(ca) or _fighting(cb)):
-            p *= CALM_MERGE
+            p *= FEDERATE if small else CALM_MERGE
         if ca.gov != cb.gov:
             p *= 0.6
         if ca.famine != cb.famine:
@@ -128,4 +133,4 @@ def step(world):
         pa = ca.m.get("pop", 0) if ca.m else 0
         pb = cb.m.get("pop", 0) if cb.m else 0
         big, small = (ca, cb) if (pa, ca.id) >= (pb, cb.id) else (cb, ca)
-        merge(world, big, small, "same former country" if kin else "")
+        merge(world, big, small, "same former country" if kin else "they band together")

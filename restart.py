@@ -7,8 +7,14 @@ Resettling  a government moves people from crowded places (refugees packed into 
             best land first.
 Colonizing  dense tiles send small groups of settlers into empty safe land next door (also reclaimed land).
 Expansion   a nation claims adjacent populated land nobody holds.
-Founding    a cluster of safe, unowned, populated tiles (refugee camps, hold-outs) that stays put long
-            enough and is big enough organizes itself into a new civilization.  It takes over the
+Hiding      once the hordes have left a stretch of country for good (no zombie within EMERGE_QUIET tiles for
+            EMERGE_DAYS), people who hid out the outbreak there come out (EMERGE_*): a village here and there across
+            the land the zombies took - the endgame isn't only the few countries that held out spreading back over
+            empty land, it is villages everywhere growing into towns and banding together into new states.
+Founding    a cluster of safe, unowned, populated tiles (refugee camps, hold-outs) - or a network of villages
+            within VILLAGE_LINK tiles of each other - that stays put long enough and is big enough organizes itself
+            into a new civilization (villages -> a local government -> merging with its neighbours into a regional
+            state (union.py) -> a nation).  It takes over the
             garrisons of fallen governments inside its land, gets a little salvage, and from then on
             fortifies, drills an army and eventually goes after the zombies (RECLAIM, civilization.py).
 """
@@ -93,6 +99,14 @@ VILLAGE_BIRTH = 0.7        # villagers' births, x a governed country's
 GATHER = 2                 # stragglers nobody governs, scattered thin over safe land (no tile above 10), gather at the
 GATHER_MIN = 15            # busiest spot within GATHER tiles once there are GATHER_MIN of them round it: a village
 GATHER_MAX = 300           # (hubs per step)
+VILLAGE_LINK = 4           # villages this close to each other count as one settled area when they organize (found)
+EMERGE_EVERY = 10
+EMERGE_START = 120         # (days into the outbreak: nobody comes out of hiding while it rages)
+EMERGE_SHARE = 0.05        # share of once-lived-on tiles where people hid out the outbreak ...
+EMERGE_QUIET = 10          # ... who come out once no zombie has been within this many tiles ...
+EMERGE_DAYS = 60           # ... for this many days (to twice that: some wait longer)
+EMERGE_GROUP = (8, 30)     # (people per hiding place: by what the place held, between these)
+EMERGE_MAX = 400           # hiding places emptied per check (whole map)
 SMALL_STATE = 600          # a state with fewer people than this ...
 SMALL_STORE = 45           # ... has children while it has this many days of food in store, harvest or not,
 SMALL_BIRTH = 3.0          # ... and SMALL_BIRTH times as many, and sends out all above SMALL_KEEP of what a place held
@@ -493,6 +507,40 @@ def _components(mask):
     return label_components(mask)
 
 
+def emerge(world):
+    """Survivors who hid out the outbreak come out once the hordes have long left (EMERGE_*): small villages on the
+    land the zombies took.  Returns how many came out."""
+    if world.ticks < EMERGE_START or getattr(world, "H0", None) is None:
+        return 0
+    H, O = world.H, world.O
+    quiet = getattr(world, "_quiet_age", None)
+    if quiet is None or quiet.shape != H.shape:
+        quiet = world._quiet_age = np.zeros(H.shape, dtype=np.int32)
+        world._hidden = (world.rng.random(H.shape) < EMERGE_SHARE) & world.statics.land & (world.H0 >= SETTLE_HOME)
+        world._hidden_wait = (EMERGE_DAYS * (1.0 + world.rng.random(H.shape))).astype(np.int32)
+    calm = world.zombie_near(EMERGE_QUIET) == 0
+    quiet[:] = np.where(calm, np.minimum(quiet + EMERGE_EVERY, 30000), 0)
+    out = world._hidden & (quiet >= world._hidden_wait) & (O == 0) & (H <= 10) & (H >= 0) & _farmable(world.T)
+    idx = np.flatnonzero(out.ravel())
+    if idx.size == 0:
+        return 0
+    if idx.size > EMERGE_MAX:
+        idx = world.rng.choice(idx, EMERGE_MAX, replace=False)
+    lo, hi = EMERGE_GROUP
+    n = np.clip(world.H0.ravel()[idx].astype(np.int32) // 6, lo, hi)
+    H.reshape(-1)[idx] += n
+    world._hidden.reshape(-1)[idx] = False
+    total = int(n.sum())
+    world.emerged = getattr(world, "emerged", 0) + total
+    if total >= 300 and world.ticks - getattr(world, "_emerge_noted", -10 ** 6) >= 90:
+        world._emerge_noted = world.ticks
+        from fracture import _place
+        r, c = divmod(int(idx[int(np.argmax(n))]), world.cols)
+        world.note(f"survivors come out of hiding across the emptied land ({world.people(total)}, around "
+                   f"{_place(world, (r, c))} and elsewhere): villages again")
+    return total
+
+
 def found(world):
     H, Z, T, O = world.H, world.Z, world.T, world.O
     cand = ((O == 0) & (H >= FOUND_MIN_TILE_POP) & is_land(T) & (Z * economy.INFESTED < H)
@@ -515,9 +563,11 @@ def found(world):
                 garrison[st["center"]] = True
     if not stable.any():
         return
-    labels, n = _components(stable)
+    # (villages a few tiles apart are one settled area: label the area round them, count the villages themselves)
+    labels, n = _components(box_sum(stable, VILLAGE_LINK // 2) > 0)
     if n == 0:
         return
+    labels = np.where(stable, labels, 0)
     flat = labels.reshape(-1)
     sizes = np.bincount(flat, minlength=n + 1)
     pops = np.bincount(flat, weights=H.reshape(-1), minlength=n + 1)
@@ -551,7 +601,10 @@ def found(world):
         civ.materials = FOUND_MATERIALS
         civ.name = govern.state_name(world, civ.gov, mask, civ.id) if world.cities else f"Colony {civ.id}"
         civ.capital = None
-        world.note(f"survivors found {civ.name}" + (f" ({govern.LABEL[civ.gov]})" if world.cities else "")
+        spread = int(mask.sum()) < 0.5 * (np.ptp(np.nonzero(mask)[0]) + 1) * (np.ptp(np.nonzero(mask)[1]) + 1)
+        world.note((f"the villages around {civ.place} band together: " if spread and getattr(civ, "place", None)
+                    else "survivors found ") + civ.name
+                   + (f" ({govern.LABEL[civ.gov]})" if world.cities else "")
                    + f": {world.people(pop)} people on {int(mask.sum())} tiles")
         _adopt_garrisons(world)
 
@@ -571,3 +624,5 @@ def step(world):
         expand(world)
     if t % FOUND_EVERY == 0:
         found(world)
+    if t % EMERGE_EVERY == 3:
+        emerge(world)

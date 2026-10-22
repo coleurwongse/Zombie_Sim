@@ -26,6 +26,7 @@ args = parser.parse_args()
 MAP_FOLDER = args.map
 PANEL = 520
 LOG_LINES = 14
+WAR_LINES = 7                    # the 'war & world affairs' section: raids, strikes, landings, pacts... (world.war_log)
 
 mode = 4
 show_text = True
@@ -139,7 +140,7 @@ def screen_to_tile(px, py):
     return int(np.floor(i)), int(np.floor(j))
 
 
-GOV_TAG = {"national": "", "junta": "J", "democracy": "R", "warlord": "W", "tribal": "C"}
+GOV_TAG = {"national": "", "junta": "J", "democracy": "R", "warlord": "W", "tribal": "C", "syndicate": "S"}
 ACT = {"quarantine": "Q", "retreat": "Rt", "fortify": "F", "purge": "P", "evacuate": "E", "reclaim": "Rc",
        "offensive": "O", "ignore": "-"}
 
@@ -159,10 +160,11 @@ def hud():
     riot = getattr(world, "riot", None)
     rioting = sim.fmt_people(world.shown(world.H, riot)) if riot is not None and riot.any() else "0"
     sub = (f"rioting {rioting}  fleeing {P(world.last_panic)}  evac {P(world.last_evac)}  "
-           f"refugees {P(world.last_refugees)}  by boat {P(world.last_boats)}")
+           f"refugees {P(world.last_refugees)}  across borders {P(getattr(world, 'last_exodus', 0))}  "
+           f"by boat {P(world.last_boats)}")
     sub2 = (f"resettled {P(getattr(world, 'last_resettled', 0))}  settlers {P(getattr(world, 'last_settlers', 0))}"
             f"  wars {len(world.wars)}  {'aid' if getattr(world, 'alliance_of', None) else 'UN'} missions "
-            f"{len(getattr(world, 'missions', []))}"
+            f"{len(getattr(world, 'missions', []))}  crime rings {sum(1 for g in getattr(world, 'rings', []) if g.get('alive'))}"
             + (f"  nukes {getattr(world, 'nuclear_strikes', 0)}" if getattr(world, "nuclear_strikes", 0) else ""))
     screen.blit(small.render(sub, True, (170, 170, 185)), (x, y)); y += 16
     screen.blit(small.render(sub2, True, (170, 170, 185)), (x, y)); y += 18
@@ -176,7 +178,7 @@ def hud():
     live.sort(key=lambda r: -(r["shown"] + 2000 * r["military"] * world.pop_scale))
     fallen = [r for r in summary if r["collapsed"]]
     list_top = y
-    list_bottom = SCREEN_H - LOG_LINES * 15 - 30
+    list_bottom = SCREEN_H - LOG_LINES * 15 - 30 - (WAR_LINES * 15 + 20)
     per_row = 15
     visible = max(1, (list_bottom - list_top) // per_row)
     scroll = max(0, min(scroll, max(0, len(live) - visible)))
@@ -185,7 +187,8 @@ def hud():
         pygame.draw.rect(screen, col, (x, y + 3, 9, 9))
         name = r["name"][:21] + ("*" if r["successor"] else "")
         gov = GOV_TAG.get(r["gov"], "")
-        flags = ("W" if r["at_war"] else "") + ("Q" if r["closed"] else "") + ("p" if r["peace"] else "")
+        flags = (("W" if r["at_war"] else "") + ("Q" if r["closed"] else "") + ("p" if r["peace"] else "")
+                 + ("T" if getattr(world.civs[r["id"]], "overlord", None) is not None else ""))
         acts = "+".join(ACT.get(a, a) for a in r["action"].split("+"))
         txt = small.render(f"{name}", True, (255, 255, 255) if r["morale"] > 3 else (255, 150, 150))
         screen.blit(txt, (x + 14, y))
@@ -201,6 +204,20 @@ def hud():
         names = ", ".join(r["name"] + (f" ({r['sites']} garrisons)" if r["sites"] else "") for r in fallen[-3:])
         screen.blit(small.render(("fallen: " + names)[:80], True, (200, 120, 120)), (x, y))
     y += 15
+    pygame.draw.line(screen, (70, 70, 90), (x, y), (x + PANEL - 20, y)); y += 3
+    # wars and world affairs, every one of them (the main log below only carries the bigger ones)
+    screen.blit(small.render("war & world affairs", True, (255, 160, 70)), (x, y)); y += 15
+    war_rows = []
+    for tick, text in reversed(list(getattr(world, "war_log", []))[-WAR_LINES:]):
+        d = world.start_date.fromordinal(world.start_date.toordinal() + tick)
+        lines = wrap(f"{d.month:02d}/{d.day:02d}/{d.year % 100:02d} {text}", PANEL - 24, small, indent="      ")
+        if len(war_rows) + len(lines) > WAR_LINES and war_rows:
+            break
+        war_rows[:0] = lines
+    for line in war_rows[-WAR_LINES:]:
+        screen.blit(small.render(line, True, (240, 150, 90)), (x, y))
+        y += 15
+    y += (WAR_LINES - len(war_rows[-WAR_LINES:])) * 15
     pygame.draw.line(screen, (70, 70, 90), (x, y), (x + PANEL - 20, y)); y += 3
     rows_ = []                                          # newest last; long messages wrap onto further lines
     for tick, text in reversed(list(world.events)[-LOG_LINES:]):
@@ -231,42 +248,143 @@ def wrap(text, width, fnt, indent=""):
 
 _frame = {}
 
-# map marks (globalaffairs.mark): what happened where, fading over a few weeks
-MARK_STYLE = {"raid": ((255, 150, 40), "x"), "strike": ((255, 60, 60), "o"), "landing": ((80, 170, 255), "^"),
-              "partisan": ((90, 230, 110), "o"), "expedition": ((255, 255, 255), "+"),
-              "revolution": ((230, 90, 255), "o"), "tribute": ((255, 215, 0), "^"),
-              "conquest": ((255, 60, 60), "x"), "village": ((200, 140, 80), "x")}
+# map marks (globalaffairs.mark): what happened where, fading over a few weeks - each kind its own shape
+MARK_STYLE = {"raid": ((255, 150, 40), "x", "raid"), "strike": ((255, 60, 60), "burst", "strike"),
+              "landing": ((80, 170, 255), "tri", "landing"), "partisan": ((90, 230, 110), "diamond", "partisans"),
+              "expedition": ((255, 255, 255), "plus", "expedition"),
+              "revolution": ((230, 90, 255), "star", "revolution"),
+              "tribute": ((255, 215, 0), "square", "tribute"), "conquest": ((255, 90, 90), "circx", "conquest"),
+              "village": ((200, 140, 80), "chevron", "village raid"), "refugees": ((120, 220, 255), "dot", "refugees"),
+              "piracy": ((40, 220, 200), "zigzag", "pirates"), "smuggling": ((240, 110, 200), "bowtie", "smuggling"),
+              "paramilitary": ((200, 60, 40), "ring2", "paramilitary"),
+              "mercenary": ((220, 200, 120), "tri_down", "mercenaries"),
+              "crackdown": ((150, 190, 255), "square_x", "crackdown")}
+CAPITAL_STYLE = ((255, 255, 255), "capital", "capital")
+CRIME_STYLE = ((230, 40, 40), "base", "crime ring")
+
+
+def draw_icon(shape, col, x, y, s):
+    if shape == "x":
+        pygame.draw.line(screen, col, (x - s, y - s), (x + s, y + s), 2)
+        pygame.draw.line(screen, col, (x - s, y + s), (x + s, y - s), 2)
+    elif shape == "plus":
+        pygame.draw.line(screen, col, (x - s, y), (x + s, y), 2)
+        pygame.draw.line(screen, col, (x, y - s), (x, y + s), 2)
+    elif shape == "burst":                               # an explosion: eight rays
+        for k in range(8):
+            a = k * np.pi / 4
+            pygame.draw.line(screen, col, (x + 0.35 * s * np.cos(a), y + 0.35 * s * np.sin(a)),
+                             (x + s * np.cos(a), y + s * np.sin(a)), 2)
+    elif shape == "tri":
+        pygame.draw.polygon(screen, col, [(x, y - s), (x - s, y + s), (x + s, y + s)], 2)
+    elif shape == "tri_down":
+        pygame.draw.polygon(screen, col, [(x, y + s), (x - s, y - s), (x + s, y - s)], 2)
+    elif shape == "diamond":
+        pygame.draw.polygon(screen, col, [(x, y - s), (x + s, y), (x, y + s), (x - s, y)], 2)
+    elif shape == "star":
+        pts = [(x + (s if k % 2 == 0 else 0.45 * s) * np.cos(-np.pi / 2 + k * np.pi / 5),
+                y + (s if k % 2 == 0 else 0.45 * s) * np.sin(-np.pi / 2 + k * np.pi / 5)) for k in range(10)]
+        pygame.draw.polygon(screen, col, pts, 0)
+    elif shape == "square":
+        pygame.draw.rect(screen, col, (x - s + 1, y - s + 1, 2 * s - 1, 2 * s - 1), 2)
+    elif shape == "square_x":
+        pygame.draw.rect(screen, col, (x - s + 1, y - s + 1, 2 * s - 1, 2 * s - 1), 1)
+        pygame.draw.line(screen, col, (x - s + 2, y - s + 2), (x + s - 2, y + s - 2), 1)
+        pygame.draw.line(screen, col, (x - s + 2, y + s - 2), (x + s - 2, y - s + 2), 1)
+    elif shape == "circx":
+        pygame.draw.circle(screen, col, (x, y), s, 2)
+        t = int(s * 0.6)
+        pygame.draw.line(screen, col, (x - t, y - t), (x + t, y + t), 2)
+        pygame.draw.line(screen, col, (x - t, y + t), (x + t, y - t), 2)
+    elif shape == "chevron":
+        pygame.draw.lines(screen, col, False, [(x - s, y - s // 2), (x, y + s // 2 + 1), (x + s, y - s // 2)], 2)
+    elif shape == "dot":
+        pygame.draw.circle(screen, col, (x, y), max(2, s // 2), 0)
+    elif shape == "zigzag":                              # waves: pirates
+        pygame.draw.lines(screen, col, False,
+                          [(x - s + k * s // 2, y + (s // 2 if k % 2 else -(s // 2))) for k in range(5)], 2)
+    elif shape == "bowtie":
+        pygame.draw.polygon(screen, col, [(x - s, y - s), (x + s, y + s), (x + s, y - s), (x - s, y + s)], 2)
+    elif shape == "ring2":
+        pygame.draw.circle(screen, col, (x, y), s, 1)
+        pygame.draw.circle(screen, col, (x, y), max(2, s // 2), 1)
+    elif shape == "capital":                             # a seat of government: a ringed dot in the country's colour
+        pygame.draw.circle(screen, (0, 0, 0), (x, y), s + 1, 0)
+        pygame.draw.circle(screen, col, (x, y), s, 0)
+        pygame.draw.circle(screen, (255, 255, 255), (x, y), s + 1, 1)
+    elif shape == "base":                                # a criminal organization's base (crime.py)
+        pygame.draw.polygon(screen, (20, 20, 20), [(x, y - s), (x + s, y), (x, y + s), (x - s, y)], 0)
+        pygame.draw.polygon(screen, col, [(x, y - s), (x + s, y), (x, y + s), (x - s, y)], 2)
+    else:
+        pygame.draw.circle(screen, col, (x, y), s, 2)
+
+
+def to_screen(r, c, half_w, half_h):
+    if world.wrap:                                       # (the copy of the tile nearest the view)
+        c = c + cols * round((cx - c) / cols)
+    return int((c + 0.5 - (cx - half_w)) * zoom), int((r + 0.5 - (cy - half_h)) * zoom)
 
 
 def draw_marks(half_w, half_h):
     import globalaffairs
-    marks = globalaffairs.recent_marks(world)
-    if not marks:
-        return
+    import crime
     size = max(4, min(10, int(zoom * 2)))
-    for t, r, c, kind in marks:
-        col, shape = MARK_STYLE.get(kind, ((255, 255, 255), "o"))
+    shown = set()
+    live = [c for c in world.civs if c.id and not c.collapsed and c.capital is not None and c.m and c.m.get("n")]
+    for c in live:                                       # tribute: a dashed gold line from tributary to overlord
+        lord = getattr(c, "overlord", None)
+        if lord is None or lord >= len(world.civs) or world.civs[lord].capital is None:
+            continue
+        a = to_screen(*c.capital, half_w, half_h)
+        b = to_screen(*world.civs[lord].capital, half_w, half_h)
+        n = max(2, int(np.hypot(b[0] - a[0], b[1] - a[1]) // 8))
+        for k in range(0, n, 2):
+            p = (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+            q = (a[0] + (b[0] - a[0]) * (k + 1) / n, a[1] + (b[1] - a[1]) * (k + 1) / n)
+            pygame.draw.line(screen, MARK_STYLE["tribute"][0], p, q, 2)
+        shown.add("tribute")
+    cap = max(2, min(6, int(zoom * 1.2)))
+    for c in live:                                       # seats of government
+        x, y = to_screen(*c.capital, half_w, half_h)
+        if -cap <= x < VIEW_W + cap and -cap <= y < VIEW_H + cap:
+            draw_icon("capital", render.civ_color(c.id), x, y, cap)
+            shown.add("capital")
+    for g in crime.active(world):                        # organized crime: its bases
+        x, y = to_screen(g["r"], g["c"], half_w, half_h)
+        if -size <= x < VIEW_W + size and -size <= y < VIEW_H + size:
+            draw_icon("base", CRIME_STYLE[0], x, y, size)
+            shown.add("base")
+    for t, r, c, kind in globalaffairs.recent_marks(world):
+        col, shape, _ = MARK_STYLE.get(kind, ((255, 255, 255), "o", kind))
         fade = 1.0 - (world.ticks - t) / (globalaffairs.MARK_DAYS + 1)
         col = tuple(int(v * (0.35 + 0.65 * fade)) for v in col)
-        if world.wrap:                                   # (the copy of the tile nearest the view)
-            c = c + cols * round((cx - c) / cols)
-        x = int((c + 0.5 - (cx - half_w)) * zoom)
-        y = int((r + 0.5 - (cy - half_h)) * zoom)
-        if not (-size <= x < VIEW_W + size and -size <= y < VIEW_H + size):
-            continue
-        if shape == "x":
-            pygame.draw.line(screen, col, (x - size, y - size), (x + size, y + size), 2)
-            pygame.draw.line(screen, col, (x - size, y + size), (x + size, y - size), 2)
-        elif shape == "+":
-            pygame.draw.line(screen, col, (x - size, y), (x + size, y), 2)
-            pygame.draw.line(screen, col, (x, y - size), (x, y + size), 2)
-        elif shape == "^":
-            pygame.draw.polygon(screen, col, [(x, y - size), (x - size, y + size), (x + size, y + size)], 2)
-        else:
-            pygame.draw.circle(screen, col, (x, y), size, 2)
-    legend = "x raid  o strike  ^ landing  o partisans  + expedition  o revolution  ^ tribute"
-    img = small.render(legend, True, (170, 170, 185))
-    screen.blit(img, (VIEW_W - img.get_width() - 8, 6))
+        x, y = to_screen(r, c, half_w, half_h)
+        if -size <= x < VIEW_W + size and -size <= y < VIEW_H + size:
+            draw_icon(shape, col, x, y, size)
+            shown.add(kind)
+    # the key: every kind of mark on the map now, drawn as it is on the map
+    items = [MARK_STYLE[k] for k in MARK_STYLE if k in shown]
+    items += [CRIME_STYLE] * ("base" in shown) + [CAPITAL_STYLE] * ("capital" in shown)
+    rows_, row, width = [], [], 0
+    for col, shape, label in items:
+        img = small.render(label, True, (190, 190, 205))
+        w_ = 16 + img.get_width() + 12
+        if width + w_ > VIEW_W - 16 and row:
+            rows_.append((row, width))
+            row, width = [], 0
+        row.append((col, shape, img))
+        width += w_
+    if row:
+        rows_.append((row, width))
+    y = 6
+    for row, width in rows_:
+        pygame.draw.rect(screen, (0, 0, 0), (VIEW_W - 12 - width, y - 2, width + 8, 18))
+        x = VIEW_W - 8 - width
+        for col, shape, img in row:
+            draw_icon(shape, col, x + 6, y + 7, 5)
+            screen.blit(img, (x + 16, y))
+            x += 16 + img.get_width() + 12
+        y += 18
 
 
 def draw():
