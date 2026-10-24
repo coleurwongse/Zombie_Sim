@@ -70,6 +70,8 @@ ROUGH_HOLDS = 0.6          # ... and their ground is this much harder to take
 DISPUTE_CHANCE = 0.004     # per check, per pair of touching countries at peace with the zombies (x both aggressions):
                            # a border dispute comes to blows
 DISTANT_WEARY_EVERY = 45
+WINTER_CALM = 0.8          # deep snow at its capital: wars are begun this much less often (and ground is taken this
+                           # much less in deep snow)
 PEACE_HOLDS = 365          # days after a peace before the same two go to war again ...
 TRUCE_HOLDS = 240          # ... after a truce against the zombies  # a war fought far away wears morale down much more slowly
 
@@ -128,11 +130,18 @@ def declare(world, a, b, reason="", quiet=False, civil=False, join=True, truce_o
     if world.ticks > 0 and (_danger(world.civs[a]) > crisis or _danger(world.civs[b]) > crisis):
         return                                            # (it would only end in a truce against the zombies next day)
     world.wars[k] = dict(a=a, b=b, start=world.ticks, ticks=0, quiet=0, civil=civil)
+    import diplomacy                                      # (remembered: diplomacy.py)
+    diplomacy.on_war(world, a, b)
     what = "CIVIL WAR" if civil else "WAR"
     verb = "fights" if civil else "attacks"
     world.war_note(f"{what}: {world.civs[a].name} {verb} {world.civs[b].name}" + (f" ({reason})" if reason else ""))
-    if join and not civil:                                # (its pact partners stand by it)
-        import globalaffairs
+    if join and not civil:                                # (its puppets march with it ...)
+        for p in world.civs:
+            if (getattr(p, "overlord", None) == a and getattr(p, "vassal_kind", None) == "puppet" and p.ai
+                    and not p.collapsed and p.id != b and key(p.id, b) not in world.wars):
+                world.war_note(f"{p.name} follows its overlord {world.civs[a].name} into the war")
+                declare(world, p.id, b, "its overlord's war", join=False, truce_ok=True)
+        import globalaffairs                              # (... and its pact partners stand by it)
         for pk in list(globalaffairs.pacts(world)):
             if b in pk:
                 p = world.civs[next(iter(pk - {b}))]
@@ -145,6 +154,8 @@ def declare(world, a, b, reason="", quiet=False, civil=False, join=True, truce_o
 def end(world, k, why):
     w = world.wars.pop(k)
     world.__dict__.setdefault("truces", {})[k] = world.ticks + (TRUCE_HOLDS if "zombies" in why else PEACE_HOLDS)
+    import diplomacy
+    diplomacy.on_peace(world, w)
     what = "civil war over" if w.get("civil") else "PEACE"
     world.war_note(f"{what}: {world.civs[w['a']].name} and {world.civs[w['b']].name} ({why}) after {w['ticks']} ticks")
     if not w.get("civil") and why in ("armistice", "exhaustion"):          # (a war won outright: a satellite)
@@ -155,7 +166,7 @@ def end(world, k, why):
             if (n >= globalaffairs.SATELLITE_TAKEN and not L.collapsed and not W.collapsed and L.m and W.m
                     and L.m.get("pop", 0) < globalaffairs.SATELLITE_POP * W.m.get("pop", 1)
                     and getattr(L, "overlord", None) is None):
-                globalaffairs.make_tributary(world, W, L, "wins the war")
+                globalaffairs.make_tributary(world, W, L, "wins the war", puppet=True)
 
 
 def at_war(world, civ_id):
@@ -184,6 +195,8 @@ def maybe_civil_war(world, parent, rebel, why="it won't let the region go", chan
     if _danger(parent) > CIVIL_CRISIS:
         return
     p = CIVIL_AT_SPLIT * chance * parent.traits.get("aggression", 1.0) * govern.mod(parent, "aggression")
+    import motives
+    p *= motives.settled(world)
     if world.pyrng.random() < p:
         declare(world, parent.id, rebel.id, why, civil=True)
 
@@ -225,7 +238,8 @@ def step(world):
             continue
         if world.ticks % CHECK_EVERY == 0:
             limit = CIVIL_WAR_MAX if civil else WAR_MAX
-            chance = (PEACE_CHANCE * (0.25 if civil else 1.0)) + 0.002 * (w["ticks"] - PEACE_MIN)
+            import motives                                # (and wars end sooner once the world has settled)
+            chance = ((PEACE_CHANCE * (0.25 if civil else 1.0)) + 0.002 * (w["ticks"] - PEACE_MIN)) / motives.settled(world)
             if w["ticks"] >= limit:
                 end(world, k, "independence" if civil else "exhaustion")
             elif w["ticks"] >= PEACE_MIN and world.pyrng.random() < chance:
@@ -256,20 +270,32 @@ def _too_big(world, a, b):
     return union.too_big(world, a, b)
 
 
+def _winter(world, c):
+    """How deep the snow lies at its capital (no campaigns in the depth of winter: seasons.py)."""
+    import seasons
+    return float(seasons.snow(world)[c.capital]) if c.capital is not None else 0.0
+
+
 def _consider(world):
+    import motives
+    import diplomacy
+    calm = motives.settled(world)                         # (the recovery era: the world settles down)
     civs = world.civs
+    hostile = diplomacy.hostility                         # (wars come between those who dislike each other)
     live = [c for c in civs if c.id and c.ai and not c.collapsed and c.m and c.m.get("pop", 0) >= MIN_POP]
     touching = contacts(world)
     for ca in live:
-        if at_war(world, ca.id) or _danger(ca) > 0.35:
-            continue
+        if at_war(world, ca.id) or _danger(ca) > 0.35 or getattr(ca, "vassal_kind", None) == "puppet":
+            continue                                      # (a puppet starts no wars of its own)
+        snowed = 1.0 - WINTER_CALM * _winter(world, ca)
         # a recovered government may go to war to reunite the country
         if getattr(world, "civil_wars", True) and ca.morale >= 7 and ca.military >= 0.35:
             for cb in live:
                 if (cb.split_from == ca.id and not at_war(world, cb.id) and _danger(cb) < CRISIS
                         and not _too_big(world, ca, cb)
                         and touching.get((min(ca.id, cb.id), max(ca.id, cb.id)), 0) >= MIN_BORDER
-                        and world.pyrng.random() < CIVIL_LATER * govern.mod(ca, "aggression")):
+                        and world.pyrng.random() < (CIVIL_LATER * govern.mod(ca, "aggression") * calm * snowed
+                                                    * min(1.5, hostile(world, ca.id, cb.id)))):
                     declare(world, ca.id, cb.id, "to reunite the country", civil=True)
                     break
             if at_war(world, ca.id):
@@ -283,9 +309,12 @@ def _consider(world):
                         and other.m and other.m.get("pop", 0) >= MIN_POP
                         and world.ticks >= at_peace_until(world, ca.id, other.id)):
                     rival = other
-        if rival is not None and world.pyrng.random() < (RIVAL_CHANCE * (1 + 3 * sc) * ca.traits["aggression"]
-                                                         * govern.mod(ca, "aggression")):
+        if rival is not None and world.pyrng.random() < (RIVAL_CHANCE * (1 + 3 * sc) * ca.traits["aggression"] * calm
+                                                         * govern.mod(ca, "aggression") * snowed
+                                                         * hostile(world, ca.id, rival.id)):
             declare(world, ca.id, rival.id, "old rivals, and the crisis")
+            continue
+        if _revanche(world, ca, live, touching, calm * snowed):
             continue
         if sc < SCARCE_AT:
             continue
@@ -297,8 +326,12 @@ def _consider(world):
             if b < MIN_BORDER or scarcity(cb) >= sc or world.ticks < at_peace_until(world, ca.id, cb.id):
                 continue                      # nothing to gain from someone just as poor
             options.append(cb)
-        if options and world.pyrng.random() < DECLARE_BASE * sc * ca.traits["aggression"] * govern.mod(ca, "aggression"):
-            cb = world.pyrng.choice(options)
+        if options and world.pyrng.random() < (DECLARE_BASE * sc * ca.traits["aggression"] * govern.mod(ca, "aggression")
+                                               * calm * snowed):
+            weights = [hostile(world, ca.id, cb.id) for cb in options]       # (the one it likes least)
+            cb = world.pyrng.choices(options, weights=weights)[0]
+            if world.pyrng.random() >= min(1.0, hostile(world, ca.id, cb.id)):
+                continue
             declare(world, ca.id, cb.id, "scarce " + ("food" if ca.famine or (ca.food or 0) < ca.food_use * SCARCE_FOOD_TICKS else "materials"))
     # border disputes: neighbours at peace with the zombies fall out now and then
     by_id = {c.id: c for c in live}
@@ -308,11 +341,32 @@ def _consider(world):
                 or _danger(ca) > 0.3 or _danger(cb) > 0.3 or allied(world, a, b)
                 or world.ticks < at_peace_until(world, a, b)):
             continue
-        p = (DISPUTE_CHANCE * ca.traits.get("aggression", 1.0) * cb.traits.get("aggression", 1.0)
-             * govern.mod(ca, "aggression"))
+        p = (DISPUTE_CHANCE * calm * ca.traits.get("aggression", 1.0) * cb.traits.get("aggression", 1.0)
+             * govern.mod(ca, "aggression") * hostile(world, a, b) * (1.0 - WINTER_CALM * _winter(world, ca)))
         if world.pyrng.random() < p:
             att, dfn = (ca, cb) if world.pyrng.random() < 0.5 else (cb, ca)
-            declare(world, att.id, dfn.id, "a border dispute")
+            if getattr(att, "vassal_kind", None) == "puppet":
+                att, dfn = dfn, att
+            if getattr(att, "vassal_kind", None) != "puppet":
+                declare(world, att.id, dfn.id, "a border dispute")
+
+
+def _revanche(world, ca, live, touching, calm):
+    """A country with an old grudge (diplomacy.py) against a neighbour no stronger than itself goes to war to take back
+    what it lost."""
+    import diplomacy
+    import globalaffairs
+    for cb in live:
+        k = (min(ca.id, cb.id), max(ca.id, cb.id))
+        g = diplomacy.grudge(world, ca.id, cb.id)
+        if (cb.id == ca.id or g < diplomacy.REVANCHE_GRUDGE or touching.get(k, 0) < MIN_BORDER
+                or at_war(world, cb.id) or _danger(cb) > 0.35 or world.ticks < at_peace_until(world, ca.id, cb.id)
+                or globalaffairs.power(world, ca) < diplomacy.REVANCHE_RATIO * globalaffairs.power(world, cb)):
+            continue
+        if world.pyrng.random() < diplomacy.REVANCHE_CHANCE * g * calm * ca.traits.get("aggression", 1.0):
+            declare(world, ca.id, cb.id, "to take back what it lost")
+            return True
+    return False
 
 
 def _pair_window(world, a, b, margin=2):
@@ -356,8 +410,9 @@ def _fight(world, w):
         prey = lm & near_win & (D <= (5 if w.get("civil") else 4)) & (H < (120 if w.get("civil") else 60)) & is_land(T)
         if not prey.any():
             continue
+        import seasons                                    # (... and nobody advances far through deep snow)
         take = prey & (world.rng.random(H.shape) < CAPTURE_CHANCE * min(2.0, sw / sl - (ratio - 0.4))
-                       * (1.0 - ROUGH_HOLDS * rough))         # (... and it is harder to take)
+                       * (1.0 - ROUGH_HOLDS * rough) * (1.0 - WINTER_CALM * seasons.snow(world)[win]))
         if take.any():
             O[take] = win_c.id
             ys, xs = np.nonzero(take)                         # (remembered: partisans fight on there - warfare.py)

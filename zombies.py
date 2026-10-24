@@ -123,6 +123,10 @@ def transport(world, rr, cc, tr, tc, amount):
     src = rr * cols + cc
     dst = tr * cols + tc
     amount = np.minimum(np.maximum(amount, 0), flat[src]).astype(np.float64)
+    import seasons                                       # (the frozen dead stay where they are: seasons.py)
+    f = seasons.frozen(world)
+    if f is not None:
+        amount = np.floor(amount * (1.0 - f.reshape(-1)[src]))
     # (only the tiles involved: sending, receiving or both)
     uniq, inv = np.unique(np.concatenate([src, dst]), return_inverse=True)
     si, di = inv[:src.size], inv[src.size:]

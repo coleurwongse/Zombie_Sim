@@ -230,6 +230,8 @@ def launch(world, civ, r, c):
     civ.bases.append(dict(center=(r, c), born=world.ticks, site=site, cleared=False, overseas=True,
                           zone=off._zone_mask(world, r, c), order=off._settle_noise(world, r, c)))
     beachhead(world, civ, r, c, OPEN_BEACH if opened else BEACH_REACH)
+    import trade                                            # (supply ships from home now and then: trade.py)
+    trade.register(world, civ, r, c)
     if getattr(civ, "home_masses", None) is None:            # (its morale is judged on the fighting at home)
         S = world.statics
         civ.home_masses = np.union1d(np.unique(S.landmass[world.O0 == civ.id]), [S.landmass[civ.capital]])

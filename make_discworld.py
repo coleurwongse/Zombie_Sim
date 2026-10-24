@@ -271,6 +271,8 @@ RIVALS = [("Klatch", "Ankh-Morpork"), ("Omnia", "Ephebe"), ("Tsort", "Ephebe"), 
 OUTBREAK = "Escrow"
 VIRULENCE_SCALE = 1.0
 SETTLE_SCALE = 1.5               # (colonies keep a bit further apart than on the world map)
+CLIMATE = "hub"                  # (cold at the Hub, warm toward the Rim: seasons.py) ...
+HUB_AT = (163, 190)              # ... (where the Hub is on this map: row, col)
 WILD_RURAL = 3
 
 

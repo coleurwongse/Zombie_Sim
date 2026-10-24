@@ -19,6 +19,11 @@ grows on its income (extortion of the people around its base, loot, smuggling, p
 Countries strike back: a secure country with an army cracks down on a ring that preys on it or sits on its land
 (CRACKDOWN_*) - the commonest end of a ring.  Hordes that reach its base finish it too.
 
+Pirate havens (PIRATE_HAVEN_*): pirates don't need a failed state - only a coastal town the law doesn't reach well:
+nobody's, or in a country that is unstable, poor or has hardly an army to patrol its coast.  They have a cap of their
+own (PIRATES_MAX), so every sea with lawless shores has its corsairs; the fleet is drawn on the sea where it last
+struck.
+
 A ring that gets strong and rich enough where nobody governs - or in a state too weak to stop it - becomes a state of
 its own (STATE_*): a criminal proto-state (government 'syndicate': strong army, good at trade, unruly, aggressive,
 won't merge) - a pirate republic, a cartel state, a militia's territory.  Its ring goes on working from there.
@@ -31,6 +36,14 @@ from civilization import box_sum
 EVERY = 10
 RINGS_MAX = 10             # on the world map (x the map's land / RINGS_LAND, at least 2)
 RINGS_LAND = 60000         # (land tiles for RINGS_MAX)
+PIRATES_MAX = 6            # pirate havens at once on the world map (x land / RINGS_LAND, at least 2)
+PIRATE_HAVEN_CHANCE = 0.3  # per check, a new haven where one can take root
+PIRATE_HAVEN_START = 60    # (days)
+PIRATE_HAVEN_PEOPLE = 250  # people within ROOT_REACH of the town
+PIRATE_HAVEN_UNSTABLE = 0.3   # a country this unstable ...
+PIRATE_HAVEN_POOR = 0.35      # ... or this short of things (war.scarcity) ...
+PIRATE_HAVEN_WEAK = 0.3       # ... or with an army this weak doesn't keep its coast
+FLEET_DAYS = 30            # (the fleet stays on the map this long after a raid)
 ROOT_CHANCE = 0.25         # per check, a new ring where one can take root (while fewer than the most)
 ROOT_PEOPLE = 600          # people (map units) within ROOT_REACH of the spot ...
 ROOT_REACH = 8
@@ -87,9 +100,9 @@ def active(world):
     return [g for g in getattr(world, "rings", []) if g.get("alive")]
 
 
-def _cap(world):
+def _cap(world, most=RINGS_MAX):
     land = int(world.statics.land.sum())
-    return int(max(2, min(RINGS_MAX, round(RINGS_MAX * land / RINGS_LAND))))
+    return int(max(2, min(most, round(most * land / RINGS_LAND))))
 
 
 def _win(world, r, c, R):
@@ -108,8 +121,64 @@ def step(world):
     for g in live:
         _run(world, g)
     live = [g for g in rings(world) if g.get("alive")]
-    if len(live) < _cap(world) and world.pyrng.random() < ROOT_CHANCE:
+    calm = motives.settled(world)                          # (fewer new rings once the world has settled)
+    if len([g for g in live if g["kind"] != "pirates"]) < _cap(world) and world.pyrng.random() < ROOT_CHANCE * calm:
         _root(world, live)
+    pirates = [g for g in rings(world) if g.get("alive") and g["kind"] == "pirates"]
+    if (world.ticks >= PIRATE_HAVEN_START and len(pirates) < _cap(world, PIRATES_MAX)
+            and world.pyrng.random() < PIRATE_HAVEN_CHANCE * calm):
+        _haven(world)
+
+
+def fleets(world):
+    """(r, c) of every pirate fleet at sea (struck within FLEET_DAYS)."""
+    return [g["fleet"] for g in active(world)
+            if g.get("fleet") is not None and world.ticks - g.get("fleet_t", -10 ** 6) <= FLEET_DAYS]
+
+
+def _haven(world):
+    """Pirates take root in a coastal town the law doesn't reach well."""
+    import war
+    from crossings import lakes
+    H, O = world.H, world.O
+    near_z = world.zombie_near(ROOT_REACH)
+    sea = ~world.statics.land & ~lakes(world)
+    lawless = np.zeros(len(world.civs), dtype=bool)
+    for c in world.civs:
+        if c.id and not c.collapsed and c.ai and c.m and c.m.get("n"):
+            lawless[c.id] = (motives.instability(c) >= PIRATE_HAVEN_UNSTABLE or war.scarcity(c) >= PIRATE_HAVEN_POOR
+                             or c.military < PIRATE_HAVEN_WEAK)
+    best = None
+    for name, r, k, pop in world.cities:
+        o = int(O[r, k])
+        if H[r, k] <= 15 or near_z[r, k] > ROOT_SAFE or not (o == 0 or lawless[o]):
+            continue
+        w2 = _win(world, r, k, 2)
+        if not sea[w2].any():
+            continue
+        if any(abs(g["r"] - r) + abs(g["c"] - k) < ROOT_APART for g in rings(world)
+               if g.get("alive") or world.ticks - g.get("died", -10 ** 6) < 200):
+            continue
+        people = int(np.maximum(H[_win(world, r, k, ROOT_REACH)], 0).sum())
+        if people < PIRATE_HAVEN_PEOPLE:
+            continue
+        score = people * (1.0 if o == 0 else 0.7) * (0.5 + world.pyrng.random())
+        if best is None or score > best[0]:
+            best = (score, r, k, o)
+    if best is None:
+        return
+    _, r, k, o = best
+    from fracture import _place
+    place = _place(world, (r, k))
+    g = dict(id=len(rings(world)), kind="pirates", r=int(r), c=int(k), host=o, born=world.ticks, alive=True,
+             strength=0.35, wealth=12.0, place=place, state=None,
+             name=world.pyrng.choice(NAMES["pirates"]).format(p=place))
+    rings(world).append(g)
+    why = ("nobody governs the coast" if o == 0 else
+           f"{world.civs[o].name} can't keep its coast")
+    world.war_note(f"PIRATES: the {g['name']} make {place} their haven ({why})")
+    import globalaffairs
+    globalaffairs.mark(world, r, k, "piracy")
 
 
 # ------------------------------------------------------------------------------------------------ taking root
@@ -234,6 +303,8 @@ def _piracy(world, g):
     prey = world.statics.land[w] & (sea <= PIRATE_REACH) & (O > 0) & (H > 40) & (D < 6)
     if own is not None:
         prey &= O != own
+    yy, xx = np.ogrid[w[0], w[1]]                        # (not their own haven: they raid elsewhere)
+    prey &= (np.abs(yy - g["r"]) + np.abs(xx - g["c"])) > ROOT_REACH
     if not prey.any():
         return set()
     dense = np.where(prey, box_sum(np.maximum(H, 0), 1) - 30 * D, -10 ** 9)
@@ -258,6 +329,11 @@ def _piracy(world, g):
     world.H[g["r"], g["c"]] = min(255, int(world.H[g["r"], g["c"]]) + int(taken.sum()))   # (captives, to the base)
     R, C = rr + (w[0].start or 0), cc + (w[1].start or 0)
     globalaffairs.mark(world, R, C, "piracy")
+    water = np.argwhere(~world.statics.land[w])               # (the fleet: on the water off the raided coast)
+    if water.size:
+        j = int(np.argmin(np.abs(water[:, 0] - rr) + np.abs(water[:, 1] - cc)))
+        g["fleet"] = (int(water[j, 0] + (w[0].start or 0)), int(water[j, 1] + (w[1].start or 0)))
+        g["fleet_t"] = world.ticks
     g["raids"] = g.get("raids", 0) + 1
     from fracture import _place
     world.war_note(f"PIRATES: the {g['name']} raid {_place(world, (R, C))} ({tgt.name}): "

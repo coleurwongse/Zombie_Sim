@@ -27,6 +27,12 @@ import landuse
 import globalaffairs
 import crime
 import recovery
+import seasons
+import disease
+import tech
+import trade
+import diplomacy
+import ideology
 import crossings
 import settlers
 import front
@@ -387,8 +393,10 @@ class World:
 
         if self.ai:
             self._update_alarm()
+            seasons.step(self)
             economy.step(self)
             people.step(self)
+            disease.step(self)
             spread.step(self)
             boats.step(self)
             nukes.step(self)
@@ -403,6 +411,10 @@ class World:
             globalaffairs.step(self)
             crime.step(self)
             recovery.step(self)
+            tech.step(self)
+            trade.step(self)
+            diplomacy.step(self)
+            ideology.step(self)
             expeditions.step(self)
             peace.step(self)
             resolve.step(self)

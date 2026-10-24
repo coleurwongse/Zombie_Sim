@@ -55,6 +55,9 @@ def step(world):
     for c in world.civs:
         if not c.ai or c.collapsed or c.nukes <= c.nukes_used or c.nukes_used >= MAX_STRIKES or not c.m:
             continue
+        import tech
+        if c.capital is not None and tech.at(world, c.capital) < tech.TECH_NUKES:
+            continue                                      # (nobody left who can launch them: tech.py)
         if world.ticks - getattr(c, "last_nuke", -10 ** 6) < COOLDOWN:
             continue
         caution = c.traits.get("caution", 1.0)

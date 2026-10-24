@@ -430,6 +430,10 @@ def build(G, seed=7):
         meta["virulence_scale"] = G.VIRULENCE_SCALE              # (the map's own bite: x --virulence)
     if getattr(G, "SETTLE_SCALE", 1.0) != 1.0:
         meta["settle_scale"] = G.SETTLE_SCALE
+    if getattr(G, "CLIMATE", None):                          # (where the snowy winters are: seasons.py)
+        meta["climate"] = G.CLIMATE
+    if getattr(G, "HUB_AT", None):
+        meta["hub_at"] = list(G.HUB_AT)
     return H, Z, D, T, O, {}, meta
 
 

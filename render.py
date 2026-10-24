@@ -16,6 +16,8 @@ def render_rgb(world, mode):
         horde = _horde_shade(world, z)
 
     img = _base(world, mode, h, z, horde)
+    if mode in (1, 2, 4, 5):
+        _winter(world, img, mode, h, z)
     if mode in (1, 4, 5) and getattr(world, "crossings", None):          # hordes swimming across to the next landmass
         import crossings
         top = getattr(world, "_hshow", (0, np.log1p(HORDE_MIN_TOP)))[1]
@@ -148,6 +150,36 @@ def describe(world, i, j):
     fall = getattr(world, "fallout", None)
     if fall is not None and fall[i, j] > 0:
         extra.append(f"fallout {fall[i, j]} days")
+    if getattr(world, "ai", False):
+        import seasons
+        sn = float(seasons.snow(world)[i, j])
+        if sn > 0.05:
+            f = seasons.frozen(world)
+            extra.append(f"snow {int(100 * sn)}%" + (f", dead {int(100 * f[i, j])}% frozen"
+                                                      if f is not None and f[i, j] > 0.05 else ""))
+        s = getattr(world, "sick", None)
+        if s is not None and s[i, j] > 0.002:
+            extra.append(f"sick {100 * s[i, j]:.1f}%")
+        t = getattr(world, "tech", None)
+        if t is not None and world.land[i, j]:
+            extra.append(f"tech {int(100 * t[i, j])}%")
+        sup = getattr(world, "supply_map", None)
+        if sup is not None and o and sup[i, j] < 0.95:
+            extra.append(f"supply {int(100 * sup[i, j])}%")
+        if o and o < len(world.civs):
+            c = world.civs[o]
+            import ideology
+            if ideology.creed(c):
+                extra.append(ideology.LABEL[ideology.creed(c)])
+            import diplomacy
+            ff = getattr(world, "_ff_memo", None)
+            if ff is None or ff[0] != (world.ticks, o):
+                ff = world._ff_memo = ((world.ticks, o), diplomacy.friend_and_foe(world, o))
+            friend, foe = ff[1]
+            if friend:
+                extra.append(f"friend: {friend}")
+            if foe:
+                extra.append(f"foe: {foe}")
     t = int(world.T[i, j])
     name = terrain.NAMES[t] if 0 <= t < terrain.N else "?"
     if hasattr(world, "shown"):
@@ -293,7 +325,72 @@ def _hordes_on_terrain(world, z, horde):
     return img
 
 
+SNOW_TINT = {1: 0.25, 2: 0.55, 4: 0.3, 5: 0.45}     # (how white the snow makes each view)
+FROZEN_COLOR = np.array([170, 225, 255], dtype=np.float32)
+
+
+def _winter(world, img, mode, h, z):
+    """Snow on the land (seasons.py) - and the frozen dead in icy blue."""
+    import seasons
+    if not getattr(world, "ai", True):
+        return
+    sn = seasons.snow(world)
+    if not sn.any():
+        return
+    a = (SNOW_TINT[mode] * sn)[..., None]
+    land = world.land & (sn > 0)
+    img[land] = (img[land] * (1 - a[land]) + 255.0 * a[land]).astype(np.uint8)
+    f = seasons.frozen(world)
+    if f is not None and mode != 2:
+        ice = (z > 10) & (h <= 10) & (f > 0.4)
+        if ice.any():
+            k = (0.75 * f[ice])[:, None]
+            img[ice] = (img[ice] * (1 - k) + FROZEN_COLOR * k).astype(np.uint8)
+
+
+def _tech_view(world, h):
+    """Mode 6: technology (tech.py) - dark red (none left) .. yellow .. white (what it had before), dim where
+    nobody lives."""
+    import tech
+    t = tech.level(world)
+    ramp = np.array([(90, 0, 0), (200, 60, 0), (240, 200, 0), (180, 255, 120), (240, 255, 255)], dtype=np.float32)
+    x = np.clip(t, 0, 1) * (len(ramp) - 1)
+    i = np.minimum(x.astype(np.int64), len(ramp) - 2)
+    f = (x - i)[..., None]
+    col = ramp[i] * (1 - f) + ramp[i + 1] * f
+    lit = np.where(h > 10, 1.0, 0.3)[..., None]
+    img = (col * lit).astype(np.uint8)
+    img[~world.land] = (0, 0, 50)
+    return img
+
+
+def _sick_view(world, h):
+    """Mode 7: disease (disease.py) - grey by people, green-yellow to purple by the share sick, blue where most are
+    immune."""
+    s = getattr(world, "sick", None)
+    img = np.zeros(h.shape + (3,), dtype=np.float32)
+    g = np.clip(h / 255.0, 0, 1) * 110 + np.where(h > 0, 25, 0)
+    img[..., 0] = img[..., 1] = img[..., 2] = g
+    if s is not None and s.shape == h.shape:
+        imm = np.clip(world.immune, 0, 1)[..., None] * (h > 10)[..., None]
+        img = img * (1 - 0.6 * imm) + np.array([60, 110, 230], dtype=np.float32) * 0.6 * imm
+        k = np.clip(s * 8, 0, 1)
+        ill = (k > 0.01) & (h > 0)
+        lo = np.array([200, 230, 40], dtype=np.float32)
+        hi = np.array([230, 40, 220], dtype=np.float32)
+        col = lo * (1 - k[..., None]) + hi * k[..., None]
+        a = (0.5 + 0.5 * k)[..., None]
+        img = np.where(ill[..., None], img * (1 - a) + col * a, img)
+    img = img.astype(np.uint8)
+    img[~world.land] = (0, 0, 40)
+    return img
+
+
 def _base(world, mode, h, z, horde=None):
+    if mode == 6:
+        return _tech_view(world, h)
+    if mode == 7:
+        return _sick_view(world, h)
     if mode == 4:
         return _ownership(world, h, z, horde)
     if mode == 5:

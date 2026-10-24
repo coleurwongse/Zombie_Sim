@@ -11,7 +11,9 @@ Run       python main.py maps/world              the world, outbreak at the Thre
                    --no-nukes  --no-civil-war  --war  --deterministic
 Keys      F11 or F: full screen (Esc leaves it); the window can also be resized by dragging its edges;
           mouse wheel over the map: zoom; right-drag / arrows / WASD: pan; Home: whole map; +/-: speed;
-          1/2/3/4/5: views (who holds a tile / terrain / governments / density / hordes on the terrain - no people); T: hover text; SPACE: pause; R: new run;
+          1/2/3/4/5: views (who holds a tile / terrain / governments / density / hordes on the terrain - no people);
+          6: technology (dark red = nothing left .. white = all it had before), 7: disease (yellow-green to purple =
+          share sick, blue = immune); G: trade routes on/off; T: hover text; SPACE: pause; R: new run;
           mouse wheel over the panel or PgUp/PgDn: scroll the list of governments.
           Terrain view: cyan = working ports, pink = airports still flying.  The map remembers zombies for a few
           days (fading), so a lone one wandering on and off a tile doesn't make borders blink.  Zombie ground is
@@ -22,7 +24,10 @@ Panel     numbers of people and zombies (and the people rioting, fleeing, evacua
           4.5m, 1.2b - on the world map each country at its own real population (meta "real_pops": China 1.4b,
           Russia 154m ...), on Middle-earth 6m and Beleriand 3.5m in all.  The simulation keeps its own small numbers.
           date (one tick = one day), people, zombies, shipping still running, world alarm; then every government, most
-          important first.  Letters: J junta, R republic, W warlords, C clans; W at war, Q borders shut, p at peace;
+          important first.  Letters: J junta, R republic, W warlords, C clans, S criminal state, H theocracy;
+          W at war, Q borders shut, p at peace, T tributary, P puppet; creeds Fa zealots, Rs restorationists,
+          Pu purifiers, Co communards, Dc death cult.  A line under the totals: the season, the frozen dead, the sick,
+          technology (by people), trade routes, cults;
           actions Q quarantine, Rt retreat, F fortify, P purge, E evacuate, Rc reclaim, O offensive.  Long log
           messages wrap onto the next line.
 Tests     python test_civ.py      python test_render.py
@@ -46,6 +51,12 @@ Files
   motives.py         why countries act: security, instability, militarism, need, ambition
   crime.py           organized crime: pirate fleets, smuggling cartels, paramilitaries, mercenaries, crime states
   recovery.py        the recovery era: once the outbreak has burned out, new outbreaks are hunted down
+  seasons.py         the year: snow, the frozen dead, harvests, hard winters
+  disease.py         epidemics: typhus, cholera, influenza ... spreading town to town, worst in winter and famine
+  tech.py            technology and infrastructure, place by place: lost where people are gone, rebuilt from neighbours
+  trade.py           supply lines (distance from the capital), trade routes, supply ships to colonies across the sea
+  diplomacy.py       what governments think of each other, and what they remember (grudges, friendships, revanchism)
+  ideology.py        creeds (zealots, restorationists, purifiers, communards, a death cult) and the cults that spread them
   peace.py           standing down after the emergency, people going back to town
   restart.py         rebuilding: births, resettlement, pioneers, villages, annexing clean land, survivors founding states
   holdouts.py        besieged cities that barricade themselves       quarantine.py  shut borders
@@ -346,7 +357,8 @@ Global affairs (globalaffairs.py)
   Raids, strikes, landings, partisans, expeditions, revolutions, tributes, crime and refugee waves are marked on the
   map for a month, each kind with a shape of its own (the key at the top right shows the ones on the map now, drawn
   as they are on the map); marks where the zombies have since taken over are dropped.  Capitals are ringed dots in
-  their country's colour; a dashed gold line runs from each tributary to its overlord ('T' in the country list).
+  their country's colour.  A line with arrows runs from each vassal to its overlord, ending in a ring round the
+  overlord's capital: dashed gold for a tributary ('T' in the country list), solid purple for a puppet ('P').
 
 Recovery and holding ground
   A government doesn't resettle land while it's under attack (danger above 0.25, its outbreak growing, people being
@@ -401,3 +413,63 @@ Motives, crime and the endgame
   learned how to fight them - fewer bites, more of them killed where they meet people, townsfolk and villagers hunting
   down any pack within a few tiles, every government mobilizing like a veteran.  Small outbreaks still happen; a
   second fall of a continent doesn't.
+
+Overlords, pirates, crowds
+  Tribute is taken by the strongest militarist states (juntas, warlords, strong armies) from weak neighbours they far
+  outmatch (twice their military power or more) - the weakest one first; a proud one that isn't hopelessly outmatched
+  may refuse and fight.  Puppet states (satellites governed in the overlord's interest): a war won decisively ends with
+  the loser a puppet, a strong neighbour may back a coup in a country in revolt and put its own men in power, and an
+  overlord tightens its grip on a tributary that has paid for a long time and is far weaker.  A puppet pays less, but
+  marches into its overlord's wars and starts none of its own; it resents it, more slowly, and throws it off when it
+  can (then the overlord makes war on it, or they're rivals).
+  Pirates have havens of their own (crime.PIRATE_HAVEN_*): any coastal town the law doesn't reach well - nobody's, or
+  in a country that is unstable, poor or has hardly an army - not only the great stretches of anarchy other crime
+  needs.  Their fleets show on the sea where they last struck (a ship).
+  Late outbreaks on small maps: besides the world-wide recovery era, each district the dead have come near that has
+  since been quiet for 90 days keeps watch (recovery.VIGIL_*) - fewer bites, more of them killed, militias - for 200
+  days after they come back, whatever the zombies elsewhere on the map are doing.
+  Crowds disperse (people.DECONGEST_*): refugees who fled to the first safe ground - against a river, up a mountain,
+  just across a border - don't stay packed there for ever: once no zombie is near, an overcrowded place sends people
+  to the land around it with room.  People fleeing across a border settle no more densely than the land
+  holds.  Villages gather at irregular distances, on the better sites - no lattice of evenly spaced hamlets.
+  The world settles down after the outbreak (motives.SETTLED_DAMP): in the recovery era wars of every kind, raids,
+  tribute demands, revolutions and new crime rings are 4x rarer, and wars end sooner - occasional, not constant.
+
+Seasons, disease, technology, trade, diplomacy, creeds
+  Seasons (seasons.py): the calendar turns.  Snowy winters by latitude on the world maps (from about 42 degrees, the
+  far north and south under snow for most of the year), in the north of Middle-earth and Beleriand, round the Hub on
+  the Disc - and on mountains anywhere; the southern hemisphere has its winter in July.  In the snow the dead freeze:
+  they don't move, hardly bite and are much easier to kill, and wherever people live near them the townsfolk go out
+  and smash them where they stand - a good part of the dead round the towns over a winter, never all of them, and
+  none out in the wilds.  In the spring thaw the rest wake up.  The price: food grows with the season (nothing under
+  the snow, the most in late summer), people eat more in the cold and burn materials for heat, and a country stores
+  only about enough to see an ordinary winter through - a war, a bad harvest or the dead in its fields and it goes
+  hungry by February.  A country with no materials left in the snow loses people to the cold.  Wars are hardly
+  begun, and ground hardly taken, in deep snow.  The map: snow whitens the land, frozen hordes show icy blue.
+  Disease (disease.py): epidemics of the ordinary kind break out where things are worst - crowded camps and cities,
+  famine, winter, no medicine, the dead unburied - and spread town to town (slower across a shut border) and along
+  trade routes.  Where medicine is gone a fever kills as it did centuries ago (several times as many); fewer
+  children are born in a plague year; a country with many sick loses heart and grows unstable.  Marked on the map
+  (three rings) and told of in the log, with their dead when they burn out.
+  Technology (tech.py) is local: each district keeps what it had while there are people enough around it to run it -
+  emptied land goes to ruin, nobody's land keeps at most half, a country's far provinces less (supply) - and gets it
+  back from better-off places nearby (its own country's first, across a border less, from trading partners).  One
+  region can keep its power stations running while the next has gone back to the plough.  It decides how much is made,
+  how well the dead are fought (guns or spears), how deadly a fever is, whether planes fly, ships sail and missiles
+  launch.  Every effect is x 1 at the old level, so the outbreak itself plays out as before.  View 6 shows it.
+  Supply lines and trade (trade.py): past about 8 degrees from its capital a country's land gets less of its power
+  (materials reaching the treasury, garrisons' backing, spare parts) - but land on another landmass (an expedition's
+  beachhead) is exempt: it lives on its own, and every two to five months a ship comes from home with new colonists
+  and supplies (until it stands on its own), unless the harbour is frozen or pirates take it.  Countries at peace that
+  can stand each other trade, over the border or by sea: more materials and food, knowledge, goodwill - and fevers.
+  Diplomacy (diplomacy.py): every government has a view of every other - kin and pact partners warmer, old rivals and
+  rival creeds colder - moved by what they do: an attack (the attacked remember it for years), land lost (a grudge
+  that fades only slowly: revanchism), tribute, help, trade.  Wars come between those who dislike each other; old
+  friends sign pacts; a pact between two that have fallen out lapses.  The hover text names a country's best friend
+  and worst enemy.
+  Creeds (ideology.py) - not often: a revolution may bring one to power, a new state may be founded on one, and cults
+  spring up in desperate places (famine, plague, snow without fuel, no government) and grow until they take their
+  country over (a theocracy) or break away with the land around them - unless a secure government cracks down.
+  Zealots (unbreakable morale, aggressive), restorationists (rebuild technology fast), purifiers (kill zombies better,
+  hostile to everyone), communards (feed themselves, peaceable), and the death cult (its people won't harm the dead).
+  Zealous creeds win over unstable neighbours now and then; any creed may fade once times are good.

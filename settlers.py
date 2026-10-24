@@ -224,4 +224,6 @@ def found(world, parent, r, c):
     civ.traits.update({k: v for k, v in parent.traits.items() if k in ("caution", "aggression")})
     world.last_settlers = getattr(world, "last_settlers", 0) + SETTLE_GROUP
     world.note(f"settlers from {parent.name} found {civ.name}")
+    import trade                                        # (across the sea: the ships keep coming for a while)
+    trade.register(world, parent, r, c, colony=civ.id)
     return civ

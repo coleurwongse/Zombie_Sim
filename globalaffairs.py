@@ -14,11 +14,16 @@ Pacts         countries that have fought the zombies side by side (an expedition
               the war (world.pacts; war.allied counts them).
 Proxy wars    a power with a stake in a war - an old rival of one side, or a pact with the other - arms the side it
               favours: materials and army strength (PROXY_*).
-Tributaries   a strong, militarist or ambitious country makes a much weaker neighbour pay tribute (TRIBUTE_*): it
-              pays a share of its food and materials, and the two are bound by a pact; a war won decisively ends with
-              the loser a satellite.  A tributary resents it (RESENT_*): it stops paying when its overlord falters (at
-              war, in trouble) or when it has grown strong enough - and the overlord answers with a punitive war if it
-              can, or the two are rivals from then on.  (The map draws a gold line from a tributary to its overlord.)
+Tributaries   the strongest militarist states (juntas, warlords, strong armies - motives.militarism) make weak
+              neighbours they far outmatch (power x TRIBUTE_RATIO) pay tribute (TRIBUTE_*): a share of their food and
+              materials, and the two are bound by a pact.  A tributary resents it (RESENT_*): it stops paying when its
+              overlord falters (at war, in trouble) or when it has grown strong enough - and the overlord answers with
+              a punitive war if it can, or the two are rivals from then on.
+Puppets       a satellite state governed in its overlord's interest (PUPPET_*): a war won decisively ends with the
+              loser a puppet; a strong neighbour may back a coup and put its own men in power in a country in revolt;
+              an overlord tightens its grip on a tributary that has paid long and is far weaker.  A puppet pays less
+              tribute, but follows its overlord into its wars and starts none of its own.
+              (The map: a line with arrows from each tributary (gold) or puppet (purple) to its overlord.)
 Revolutions   an unstable government (motives.instability: morale breaking, famine, riots, a war going badly, foreign
               rule, a shaky regime) may be overthrown (REVOLT_*): a new form of government (junta, republic,
               warlords...), a new name, a shaken army.
@@ -70,8 +75,14 @@ TRIBUTE_EVERY = 30
 TRIBUTE_CHANCE = 0.08
 TRIBUTE_POP = 0.25          # the weaker one has under this share of the stronger one's people ...
 TRIBUTE_SHARE = 0.04        # ... and pays this share of its materials and food every EVERY days
+TRIBUTE_RATIO = 2.0         # (military power - army x training x size: the overlord has at least this x the other's)
+TRIBUTE_MILITARIST = 0.4    # (motives.militarism - or ambition - an overlord needs at least this)
 SATELLITE_TAKEN = 25        # a war in which the winner took this many districts and the loser is this much weaker
-SATELLITE_POP = 0.5         # (people) ends with the loser a satellite
+SATELLITE_POP = 0.5         # (people) ends with the loser a puppet
+PUPPET_SHARE = 0.02         # a puppet pays this share (instead of TRIBUTE_SHARE)
+PUPPET_COUP = 0.35          # chance a revolution next to a militarist power TRIBUTE_RATIO x stronger installs its puppet
+PUPPET_TIGHTEN = 0.05       # per tribute check: an overlord makes a tributary of PUPPET_AFTER days, power ratio 3+,
+PUPPET_AFTER = 300          #  its puppet
 RESENT_EVERY = 0.03         # a tributary's resentment grows this much per check (x its own militarism) ...
 RESENT_STRONG = 0.75        # ... and it stops paying once resentful enough and this strong next to its overlord
 REVOLT_CHANCE = 0.15        # per check, for a government at the very edge (x ((instability - REVOLT_AT) / (1 - ..)) ** 1.5,
@@ -148,6 +159,7 @@ def step(world):
         lord = getattr(c, "overlord", None)
         if lord is not None and (lord >= len(world.civs) or world.civs[lord].collapsed):
             c.overlord = None
+            c.vassal_kind = None
     if world.ticks % EVERY:
         return
     motives.update(world)
@@ -321,6 +333,8 @@ def _reconstruction(world, live):
         if key not in noted:
             noted.add(key)
             world.war_note(f"{d.name} helps rebuild {r.name}: materials and food")
+            import diplomacy
+            diplomacy.on_help(world, d.id, r.id)
             if world.pyrng.random() < PACT_CHANCE:
                 _sign(world, d, r, "reconstruction")
 
@@ -333,49 +347,82 @@ def _tribute(world, live):
         if lord is None:
             continue
         L = world.civs[lord]
-        c.resent = getattr(c, "resent", 0.0) + RESENT_EVERY * (0.5 + motives.militarism(c))
+        puppet = getattr(c, "vassal_kind", "tributary") == "puppet"
+        import diplomacy                                # (the more it hates its overlord, the faster)
+        c.resent = getattr(c, "resent", 0.0) + (RESENT_EVERY * (0.5 + motives.militarism(c)) * (0.5 if puppet else 1.0)
+                                                * (1.0 + diplomacy.grudge(world, c.id, L.id)))
         sa = 0.25 + c.military * (0.6 + 0.8 * c.strength)
         sl = 0.25 + L.military * (0.6 + 0.8 * L.strength)
         if (L.collapsed or not L.m or L.threat(L.m) > 0.5 or (war.at_war(world, L.id) and world.pyrng.random() < 0.05)
                 or (c.resent >= 1.0 and sa >= RESENT_STRONG * sl and world.pyrng.random() < 0.2)):
             _throw_off(world, c, L)
             continue
-        m = c.materials * TRIBUTE_SHARE
+        share = PUPPET_SHARE if puppet else TRIBUTE_SHARE
+        m = c.materials * share
         c.materials -= m
         L.materials += m
         if c.food is not None and L.food is not None:
-            f = c.food * TRIBUTE_SHARE
+            f = c.food * share
             c.food -= f
             L.food += f
     if world.ticks % TRIBUTE_EVERY:
         return
     touching = war.contacts(world)
-    for s in live:
-        drive = max(motives.militarism(s), motives.ambition(world, s))
-        if (s.military < 0.5 or s.threat(s.m) > 0.15 or war.at_war(world, s.id) or getattr(s, "overlord", None)
-                or world.pyrng.random() >= TRIBUTE_CHANCE * 2.0 * drive):
+    # an overlord tightens its grip: a tributary that has paid long and is far weaker becomes its puppet
+    for c in live:
+        lord = getattr(c, "overlord", None)
+        if (lord is None or getattr(c, "vassal_kind", "tributary") == "puppet"
+                or world.ticks - getattr(c, "vassal_since", world.ticks) < PUPPET_AFTER):
             continue
+        L = world.civs[lord]
+        if power(world, L) >= 3 * power(world, c) and world.pyrng.random() < PUPPET_TIGHTEN * (0.5 + motives.militarism(L)):
+            make_tributary(world, L, c, "tightens its grip", puppet=True)
+    # the strongest militarist states first: each demands tribute of the weakest neighbour it far outmatches
+    lords = [s for s in live if s.military >= 0.5 and s.threat(s.m) <= 0.15 and not war.at_war(world, s.id)
+             and getattr(s, "overlord", None) is None
+             and max(motives.militarism(s), motives.ambition(world, s)) >= TRIBUTE_MILITARIST]
+    lords.sort(key=lambda s: -power(world, s))
+    for s in lords:
+        if (war.at_war(world, s.id)
+                or world.pyrng.random() >= TRIBUTE_CHANCE * 2.5 * motives.militarism(s) * motives.settled(world)):
+            continue
+        ps = power(world, s)
+        prey = []
         for w_ in live:
             k = (min(s.id, w_.id), max(s.id, w_.id))
             if (w_.id == s.id or touching.get(k, 0) < war.MIN_BORDER or getattr(w_, "overlord", None) is not None
                     or war.allied(world, s.id, w_.id) or w_.m.get("pop", 0) > TRIBUTE_POP * s.m.get("pop", 1)
-                    or war.at_war(world, w_.id)):
+                    or war.at_war(world, w_.id) or ps < TRIBUTE_RATIO * power(world, w_)
+                    or any(getattr(v, "overlord", None) == w_.id for v in live)):
                 continue
-            if w_.military < 0.6 * s.military or world.pyrng.random() < 0.6:
-                make_tributary(world, s, w_, "demands tribute")
-            else:
-                war.declare(world, s.id, w_.id, f"it refused to pay tribute")
-                if w_.capital is not None:
-                    mark(world, *w_.capital, "conquest")
-            break
+            prey.append((ps / max(power(world, w_), 1e-9), w_))
+        if not prey:
+            continue
+        import diplomacy                                # (the weakest - and, of those, the one it likes least)
+        ratio, w_ = max(prey, key=lambda x: x[0] * (1.0 - 0.5 * diplomacy.opinion(world, s.id, x[1].id)))
+        # (a proud or warlike one may refuse - if it isn't hopelessly outmatched)
+        if ratio < 3.0 and world.pyrng.random() < 0.5 * motives.militarism(w_) + 0.2:
+            war.declare(world, s.id, w_.id, "it refused to pay tribute")
+            if w_.capital is not None:
+                mark(world, *w_.capital, "conquest")
+        else:
+            make_tributary(world, s, w_, "demands tribute")
+
+
+def power(world, c):
+    """Military power: army strength x training, x the country's size."""
+    return (0.25 + c.military * (0.6 + 0.8 * c.strength)) * c.size(world)
 
 
 def _throw_off(world, c, L):
     """`c` stops paying `L`: if the overlord can, it makes war to bring it back in line; if not, they're rivals."""
     import war
     c.overlord = None
+    c.vassal_kind = None
     c.resent = 0.0
     pacts(world).pop(frozenset((c.id, L.id)), None)
+    import diplomacy
+    diplomacy.on_thrown_off(world, L.id, c.id)
     if c.capital is not None:
         mark(world, *c.capital, "revolution")
     able = (not L.collapsed and L.m and L.m.get("n") and L.threat(L.m) < 0.3 and L.military >= 0.35
@@ -389,14 +436,22 @@ def _throw_off(world, c, L):
             world.__dict__.setdefault("rivals", set()).add(frozenset((c.id, L.id)))
 
 
-def make_tributary(world, lord, vassal, how="demands tribute"):
+def make_tributary(world, lord, vassal, how="demands tribute", puppet=False):
+    """`vassal` pays tribute to `lord` - or, `puppet`, is its puppet state."""
+    if getattr(vassal, "overlord", None) != lord.id:
+        vassal.vassal_since = world.ticks
     vassal.overlord = lord.id
+    vassal.vassal_kind = "puppet" if puppet else "tributary"
     vassal.resent = 0.0
+    for k in [k for k in pacts(world) if vassal.id in k and lord.id not in k]:
+        del pacts(world)[k]                              # (its foreign policy is its overlord's now)
     pacts(world)[frozenset((lord.id, vassal.id))] = world.ticks
-    world.war_note(f"{lord.name} {how}: {vassal.name} becomes its {'satellite' if 'war' in how else 'tributary'}"
-                   f" (paying tribute to {lord.name})")
+    import diplomacy
+    diplomacy.on_vassal(world, lord.id, vassal.id, puppet)
+    what = (f"a puppet state of {lord.name}" if puppet else f"its tributary (paying tribute to {lord.name})")
+    world.war_note(f"{lord.name} {how}: {vassal.name} becomes {what}")
     if vassal.capital is not None:
-        mark(world, *vassal.capital, "tribute")
+        mark(world, *vassal.capital, "puppet" if puppet else "tribute")
 
 
 # ------------------------------------------------------------------------------------------------ revolutions
@@ -406,7 +461,7 @@ def _revolutions(world, live):
         inst = motives.instability(c)
         if (inst < REVOLT_AT or c.threat(c.m) >= REVOLT_THREAT
                 or world.ticks - max(getattr(c, "_revolution", -10 ** 6), getattr(c, "founded", 0)) < REVOLT_COOLDOWN
-                or world.pyrng.random() >= (REVOLT_CHANCE * ((inst - REVOLT_AT) / (1 - REVOLT_AT)) ** 1.5
+                or world.pyrng.random() >= (REVOLT_CHANCE * motives.settled(world) * ((inst - REVOLT_AT) / (1 - REVOLT_AT)) ** 1.5
                                             * (1.0 - 0.7 * c.threat(c.m)))):
             continue
         c._revolution = world.ticks
@@ -431,6 +486,29 @@ def _revolutions(world, live):
         world.war_note(f"REVOLUTION in {old_name} ({'famine' if c.famine else 'unrest'}): {what} - now {c.name}")
         if c.capital is not None:
             mark(world, *c.capital, "revolution")
+        import ideology                                   # (maybe a creed comes to power with it: ideology.py)
+        ideology.on_revolution(world, c)
+        backer = _backer(world, c, live)                  # (a strong neighbour puts its own men in power)
+        if backer is not None and world.pyrng.random() < PUPPET_COUP:
+            make_tributary(world, backer, c, "backs the coup", puppet=True)
+
+
+def _backer(world, c, live):
+    """The strongest militarist neighbour far stronger than `c` (or None)."""
+    import war
+    if getattr(c, "overlord", None) is not None:
+        return None
+    touching = war.contacts(world)
+    best = None
+    for b in live:
+        k = (min(b.id, c.id), max(b.id, c.id))
+        if (b.id == c.id or touching.get(k, 0) < war.MIN_BORDER or getattr(b, "overlord", None) is not None
+                or motives.militarism(b) < TRIBUTE_MILITARIST or power(world, b) < TRIBUTE_RATIO * power(world, c)
+                or war.key(b.id, c.id) in world.wars):
+            continue
+        if best is None or power(world, b) > power(world, best):
+            best = b
+    return best
 
 
 # ------------------------------------------------------------------------------------------------ conquest
@@ -439,8 +517,8 @@ def _conquest(world, live):
     touching = war.contacts(world)
     for a in live:
         amb = motives.ambition(world, a)
-        if (amb < CONQUEST_AMBITION or a.military < 0.6 or a.threat(a.m) > 0.15 or war.at_war(world, a.id)
-                or world.pyrng.random() >= CONQUEST_CHANCE * amb):
+        if (amb < CONQUEST_AMBITION or getattr(a, "vassal_kind", None) == "puppet" or a.military < 0.6 or a.threat(a.m) > 0.15 or war.at_war(world, a.id)
+                or world.pyrng.random() >= CONQUEST_CHANCE * amb * motives.settled(world)):
             continue
         sa = 0.25 + a.military * (0.6 + 0.8 * a.strength)
         prey = []
@@ -490,7 +568,7 @@ def _village_raids(world, live):
     for c in live:
         drive = motives.militarism(c) + motives.need(c) - 0.3
         if (c.military < 0.3 or c.threat(c.m) > 0.2 or not c.capital or drive <= 0
-                or world.pyrng.random() >= VRAID_CHANCE * drive):
+                or world.pyrng.random() >= VRAID_CHANCE * drive * motives.settled(world)):
             continue
         win = c.m.get("win") or (slice(None), slice(None))
         mine = (O[win] == c.id) & (H[win] > 10)

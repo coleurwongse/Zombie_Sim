@@ -15,6 +15,8 @@ political tradition of its old country first, then what it breaks away from, the
              small army, very resilient morale, little unrest (few cities to riot in).
   syndicate  a criminal proto-state (crime.py: pirates, a cartel, a militia that took over).  Never chosen for a new
              state: a crime ring becomes one.  Strong army, trades well, unruly, very aggressive, hardly ever merges.
+  theocracy  rule by a creed's priesthood (ideology.py: a cult that took over, or broke away).  Never chosen for a new
+             state either.  Disciplined, resilient, aggressive, wary of merging.
 
 Every modifier is a multiplier (1.0 = like a national government).
 """
@@ -29,14 +31,16 @@ GOV = {
     "warlord":  (0.85, 0.80, 1.30, 1.25, 0.90, 1.30, 1.80, 0.50),
     "tribal":   (1.15, 0.50, 0.70, 0.60, 1.00, 0.50, 0.90, 0.70),
     "syndicate": (0.90, 1.15, 1.40, 1.10, 0.90, 1.20, 1.60, 0.30),
+    "theocracy": (1.00, 0.90, 1.20, 0.70, 1.10, 0.70, 1.30, 0.40),
 }
 KEYS = ("food", "materials", "army", "morale_loss", "recover", "unrest", "aggression", "merge")
 LABEL = {"national": "", "junta": "junta", "democracy": "republic", "warlord": "warlords", "tribal": "clans",
-         "syndicate": "criminal state"}
+         "syndicate": "criminal state", "theocracy": "theocracy"}
 
 
 def mod(civ, key):
-    return GOV.get(getattr(civ, "gov", "national"), GOV["national"])[KEYS.index(key)]
+    import ideology                                      # (and its creed, if it has one: ideology.py)
+    return GOV.get(getattr(civ, "gov", "national"), GOV["national"])[KEYS.index(key)] * ideology.mod(civ, key)
 
 
 # What political tradition a region inherits from the country it belonged to before the outbreak (world map; on the
@@ -255,10 +259,11 @@ def state_name(world, gov, region, civ_id, parent=None, near=None):
         world.civs[civ_id].place = place
     if place is None:
         base = {"junta": "Junta", "democracy": "Republic", "warlord": "Warlords", "tribal": "Clans",
-                "national": "State", "syndicate": "Syndicate"}[gov]
+                "national": "State", "syndicate": "Syndicate", "theocracy": "Holy State"}[gov]
         return f"{base} {civ_id}"
     base = {"junta": f"{place} Junta", "democracy": f"Republic of {place}", "warlord": f"{place} Warlords",
-            "tribal": f"{place} Clans", "national": f"Free {place}", "syndicate": f"Syndicate of {place}"}[gov]
+            "tribal": f"{place} Clans", "national": f"Free {place}", "syndicate": f"Syndicate of {place}",
+            "theocracy": f"Holy {place}"}[gov]
     live = {c.name for c in world.civs if not c.collapsed}
     name, k = base, 0
     ordinals = ("Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh")

@@ -96,8 +96,9 @@ VILLAGE_GROUP = 10         # (VILLAGE_BIRTH), but has no army and no walls: a ho
 VILLAGE_NEAR, VILLAGE_FAR = 3, 10          # villages that holds out long enough organizes itself (found())
 VILLAGE_MAX = 300          # groups per step (whole map)
 VILLAGE_BIRTH = 0.7        # villagers' births, x a governed country's
-GATHER = 2                 # stragglers nobody governs, scattered thin over safe land (no tile above 10), gather at the
-GATHER_MIN = 15            # busiest spot within GATHER tiles once there are GATHER_MIN of them round it: a village
+GATHER = (2, 5)            # stragglers nobody governs, scattered thin over safe land (no tile above 10), gather at the
+GATHER_MIN = 15            # best spot within 2..5 tiles (it varies: villages aren't evenly spaced) - where most of them
+                           # are, on the better land, the coast (and some luck) - once there are GATHER_MIN round it
 GATHER_MAX = 300           # (hubs per step)
 VILLAGE_LINK = 4           # villages this close to each other count as one settled area when they organize (found)
 EMERGE_EVERY = 10
@@ -111,6 +112,8 @@ SMALL_STATE = 600          # a state with fewer people than this ...
 SMALL_STORE = 45           # ... has children while it has this many days of food in store, harvest or not,
 SMALL_BIRTH = 3.0          # ... and SMALL_BIRTH times as many, and sends out all above SMALL_KEEP of what a place held
 SMALL_KEEP = 0.5
+LEAN_BIRTH = 0.5           # births x this in a country on short rations (none at all in famine: _healthy) ...
+SICK_BIRTH = 4.0           # ... and x 1 - this x the share of the people sick (disease.py), down to a fifth
 
 
 def _healthy(world):
@@ -163,6 +166,14 @@ def grow(world, healthy, scale=1.0):
         small[c.id] = bool(c.id and c.m and 0 < c.m.get("pop", 0) < SMALL_STATE)
     births = births * np.where(small[O], SMALL_BIRTH, 1.0) * np.where(_rush(world) > 1.0, RUSH_BIRTH, 1.0)[O]
     births = np.where(village, births * VILLAGE_BIRTH, births)
+    lean = np.ones(len(world.civs))                      # (fewer children on short rations - and in a plague year)
+    for c in world.civs:
+        if c.id and getattr(c, "rationing", False):
+            lean[c.id] = LEAN_BIRTH
+    births = births * lean[O]
+    sick = getattr(world, "sick", None)
+    if sick is not None and sick.shape == H.shape:
+        births = births * np.clip(1.0 - SICK_BIRTH * sick, 0.2, 1.0)
     H += _rounded(world, np.where(allow | village, births, 0.0)).astype(np.int32)
 
 
@@ -478,14 +489,20 @@ def _gather(world, near):
     if not thin.any():
         return 0
     held = np.where(thin, H, 0)
-    total = box_sum(held, GATHER)
-    # hubs: the busiest thin tile round itself (ties broken by position), with enough people about
+    R = world.pyrng.randint(*GATHER) if world.stochastic else GATHER[0]
+    total = box_sum(held, R)
+    # hubs: the best thin tile round itself - by the people there, the land (what it held before), the coast, luck -
+    # with enough people about
     from engine import shift
-    best = held.astype(np.float64) + 1e-6 * np.arange(H.size).reshape(H.shape) / H.size
+    hm = home(world)
+    coast = box_sum(~world.statics.land, 1) > 0
+    luck = world.rng.random(H.shape) if world.stochastic else np.zeros(H.shape)
+    best = (held * (1.0 + 0.5 * np.minimum(hm, 110) / 110.0 + 0.4 * coast + 0.6 * luck)
+            + 1e-6 * np.arange(H.size).reshape(H.shape) / H.size)
     peak = best.copy()
-    for dr in range(-GATHER, GATHER + 1):
-        for dc in range(-GATHER, GATHER + 1):
-            if dr or dc:
+    for dr in range(-R, R + 1):
+        for dc in range(-R, R + 1):
+            if (dr or dc) and dr * dr + dc * dc <= R * R + 1:          # (round, not square)
                 np.maximum(peak, shift(best, dr, dc, world.wrap, 0.0), out=peak)
     hubs = np.argwhere(thin & (best >= peak) & (total >= GATHER_MIN))
     if len(hubs) > GATHER_MAX:
@@ -493,7 +510,7 @@ def _gather(world, near):
     rows, cols = H.shape
     n = 0
     for r, c in hubs:
-        r0, r1, c0, c1 = max(r - GATHER, 0), min(r + GATHER + 1, rows), max(c - GATHER, 0), min(c + GATHER + 1, cols)
+        r0, r1, c0, c1 = max(r - R, 0), min(r + R + 1, rows), max(c - R, 0), min(c + R + 1, cols)
         win = thin[r0:r1, c0:c1]
         got = int(H[r0:r1, c0:c1][win].sum())
         H[r0:r1, c0:c1][win] = 0

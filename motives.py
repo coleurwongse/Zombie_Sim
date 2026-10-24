@@ -15,10 +15,18 @@ ambition     0..1  secure, and inclined to expand: an aggressive temper or a mil
 """
 import numpy as np
 
-MILITARIST = {"junta": 1.0, "warlord": 0.9, "syndicate": 0.85, "national": 0.35, "tribal": 0.4, "democracy": 0.15}
+MILITARIST = {"junta": 1.0, "warlord": 0.9, "syndicate": 0.85, "national": 0.35, "tribal": 0.4, "democracy": 0.15,
+              "theocracy": 0.6}
 REGIME_SHAKY = {"warlord": 0.15, "junta": 0.08, "syndicate": 0.12, "national": 0.0, "tribal": 0.0,
-                "democracy": -0.05}
+                "democracy": -0.05, "theocracy": 0.05}
 SMOOTH = 0.2               # (per update: the new reading's weight)
+SETTLED_DAMP = 0.75        # in the recovery era (recovery.era) the world settles down: wars, raids, tribute demands,
+                           # revolutions and new crime x (1 - this x era) - they still happen, now and then
+
+
+def settled(world):
+    """How often the world's troubles happen now: 1 during the outbreak, 1 - SETTLED_DAMP once it has burned out."""
+    return 1.0 - SETTLED_DAMP * float(getattr(world, "era", 0.0))
 
 
 def _ok(c):
@@ -42,7 +50,8 @@ def instability(c):
 
 def militarism(c):
     import govern
-    m = 0.6 * MILITARIST.get(c.gov, 0.35) + 0.4 * min(1.0, c.military)
+    import ideology
+    m = 0.6 * MILITARIST.get(c.gov, 0.35) + 0.4 * min(1.0, c.military) + ideology.militarism(c)
     return float(np.clip(m * c.traits.get("aggression", 1.0) * (0.7 + 0.3 * govern.mod(c, "aggression")), 0, 1))
 
 
@@ -56,7 +65,8 @@ def ambition(world, c):
     temper = c.traits.get("aggression", 1.0) * govern.mod(c, "aggression")
     drive = float(np.clip(0.5 * temper + 0.5 * militarism(c), 0, 1.5))
     means = min(1.0, 0.4 + c.military) * min(1.0, c.materials / 80.0 + 0.3)
-    return float(np.clip(security(world, c) * drive * means, 0, 1))
+    import ideology
+    return float(np.clip(security(world, c) * (drive + ideology.ambition(c)) * means, 0, 1))
 
 
 def update(world):
@@ -73,6 +83,8 @@ def update(world):
     riot = getattr(world, "riot", None)
     riots = (np.bincount(O[land & riot], minlength=n) / np.maximum(tiles, 1)
              if riot is not None and riot.shape == O.shape else np.zeros(n))
+    import seasons
+    wload = seasons.winter_load(world)
     losing = {}
     for w in world.wars.values():                      # (ground lost in a war)
         for win_id, k in w.get("captured", {}).items():
@@ -85,10 +97,13 @@ def update(world):
         hunger = 1.0 if c.famine else war.scarcity(c)
         lost = min(1.0, c.m.get("damage", 0.0))         # (a government that lost its people is discredited)
         young = 0.1 if c.successor and world.ticks - c.founded < 200 else 0.0
+        sick = min(0.3, 3.0 * getattr(c, "sick_share", 0.0))         # (an epidemic: disease.py)
+        cold = 0.15 * float(wload[c.id]) if c.materials < 5 else 0.0  # (a winter without fuel: seasons.py)
         raw = (0.3 * morale + 0.3 * hunger + 0.5 * min(1.0, unrest[c.id]) + min(0.3, 4.0 * riots[c.id])
-               + 0.3 * lost + young
+               + 0.3 * lost + young + sick + cold
                + (0.1 if war.at_war(world, c.id) else 0.0) + min(0.2, losing.get(c.id, 0) / 100.0)
-               + (0.12 if getattr(c, "overlord", None) is not None else 0.0)
+               + (0.0 if getattr(c, "overlord", None) is None
+                  else 0.18 if getattr(c, "vassal_kind", None) == "puppet" else 0.12)
                + REGIME_SHAKY.get(c.gov, 0.0))
         raw = float(np.clip(raw, 0, 1))
         c.instability = (1 - SMOOTH) * getattr(c, "instability", raw) + SMOOTH * raw

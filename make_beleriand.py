@@ -273,6 +273,7 @@ PLACES = [
 PORTS = [("Eglarest", 6), ("Brithombar", 6), ("Balar", 5), ("Arvernien", 2), ("Vinyamar", 1)]
 VIRULENCE_SCALE = 1.25        # (the zombies bite harder here than --virulence alone: Beleriand is a hard map)
 SETTLE_SCALE = 2.0            # (settlers' colonies keep further apart on this small map: settlers.py)
+CLIMATE = "north"             # (snowy winters in the north - Hithlum, Dorthonion, Angband: seasons.py)
 WARS = [("Angband", "Hithlum (Fingolfin)"), ("Angband", "Dorthonion (Angrod and Aegnor)"),
         ("Angband", "Himring (Maedhros)"), ("Angband", "Tol Sirion (Orodreth)")]
 RIVALS = [("Doriath (Thingol)", "Himlad (Celegorm and Curufin)"), ("Doriath (Thingol)", "Himring (Maedhros)"),

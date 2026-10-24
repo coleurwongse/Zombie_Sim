@@ -4,6 +4,7 @@ import random
 import numpy as np
 import pygame
 
+import ideology
 import render
 import war
 import sim
@@ -30,6 +31,7 @@ WAR_LINES = 7                    # the 'war & world affairs' section: raids, str
 
 mode = 4
 show_text = True
+show_trade = True                # trade routes between capitals ('g')
 done = False
 paused = False
 steps_per_frame = 1
@@ -140,7 +142,8 @@ def screen_to_tile(px, py):
     return int(np.floor(i)), int(np.floor(j))
 
 
-GOV_TAG = {"national": "", "junta": "J", "democracy": "R", "warlord": "W", "tribal": "C", "syndicate": "S"}
+GOV_TAG = {"national": "", "junta": "J", "democracy": "R", "warlord": "W", "tribal": "C", "syndicate": "S",
+           "theocracy": "H"}
 ACT = {"quarantine": "Q", "retreat": "Rt", "fortify": "F", "purge": "P", "evacuate": "E", "reclaim": "Rc",
        "offensive": "O", "ignore": "-"}
 
@@ -167,7 +170,8 @@ def hud():
             f"{len(getattr(world, 'missions', []))}  crime rings {sum(1 for g in getattr(world, 'rings', []) if g.get('alive'))}"
             + (f"  nukes {getattr(world, 'nuclear_strikes', 0)}" if getattr(world, "nuclear_strikes", 0) else ""))
     screen.blit(small.render(sub, True, (170, 170, 185)), (x, y)); y += 16
-    screen.blit(small.render(sub2, True, (170, 170, 185)), (x, y)); y += 18
+    screen.blit(small.render(sub2, True, (170, 170, 185)), (x, y)); y += 16
+    screen.blit(small.render(world_line(), True, (150, 200, 230)), (x, y)); y += 18
     cols_txt = "country                      pop    mor army  forts  doing"
     screen.blit(small.render(cols_txt, True, (140, 140, 160)), (x + 14, y)); y += 16
     pygame.draw.line(screen, (70, 70, 90), (x, y), (x + PANEL - 20, y)); y += 3
@@ -188,14 +192,16 @@ def hud():
         name = r["name"][:21] + ("*" if r["successor"] else "")
         gov = GOV_TAG.get(r["gov"], "")
         flags = (("W" if r["at_war"] else "") + ("Q" if r["closed"] else "") + ("p" if r["peace"] else "")
-                 + ("T" if getattr(world.civs[r["id"]], "overlord", None) is not None else ""))
+                 + ({"puppet": "P"}.get(getattr(world.civs[r["id"]], "vassal_kind", None), "T")
+                    if getattr(world.civs[r["id"]], "overlord", None) is not None else "")
+                 + ideology.TAG.get(ideology.creed(world.civs[r["id"]]), ""))
         acts = "+".join(ACT.get(a, a) for a in r["action"].split("+"))
         txt = small.render(f"{name}", True, (255, 255, 255) if r["morale"] > 3 else (255, 150, 150))
         screen.blit(txt, (x + 14, y))
         stats = f"{gov:1s} {sim.fmt_people(r['shown']):>7s}  {r['morale']:2d}  {r['military']:.2f}  {r['sites']:3d}  {acts}"
         screen.blit(small.render(stats, True, (190, 190, 205)), (x + 175, y))
         if flags:
-            screen.blit(small.render(flags, True, (255, 170, 60)), (x + PANEL - 30, y))
+            screen.blit(small.render(flags, True, (255, 170, 60)), (x + PANEL - 42, y))
         y += per_row
     more = f"{scroll + 1}-{min(len(live), scroll + visible)} of {len(live)} governments (wheel / PgUp PgDn)"
     screen.blit(small.render(more, True, (130, 130, 150)), (x, list_bottom + 1))
@@ -231,6 +237,30 @@ def hud():
         y += 15
 
 
+def world_line():
+    """Season, frozen dead, sickness, technology, trade, cults."""
+    import seasons
+    import trade
+    P = world.people
+    season = seasons.season_name(world)
+    south = world.meta.get("bounds") and seasons._climate(world) == "lat"
+    if south:
+        other = {"winter": "summer", "summer": "winter", "spring": "autumn", "autumn": "spring"}[season]
+        season = f"{season} N / {other} S"
+    frozen = getattr(world, "frozen_dead", 0.0)
+    eps = [e for e in getattr(world, "epidemics", []) if not e["over"]]
+    sick = world.shown(world.H * world.sick) if getattr(world, "sick", None) is not None else 0.0
+    hp = np.where(world.H > 10, world.H, 0)
+    t = getattr(world, "tech", None)
+    lvl = float((t * hp).sum() / max(1, hp.sum())) if t is not None else 1.0
+    cults = sum(1 for g in getattr(world, "cults", []) if g["alive"])
+    creeds = sum(1 for c in world.civs if c.id and not c.collapsed and ideology.creed(c))
+    return (f"{season}" + (f"  frozen dead {P(frozen)}" if frozen >= 1 else "")
+            + f"  sick {sim.fmt_people(sick)}" + (f" ({len(eps)} epidemics)" if eps else "")
+            + f"  tech {int(100 * lvl)}%  trade routes {len(trade.routes(world))}"
+            + (f"  cults {cults}" if cults else "") + (f"  creeds {creeds}" if creeds else ""))
+
+
 def wrap(text, width, fnt, indent=""):
     """`text` broken into lines no wider than `width` pixels (at word boundaries; continuation lines indented)."""
     lines, cur = [], ""
@@ -253,20 +283,60 @@ MARK_STYLE = {"raid": ((255, 150, 40), "x", "raid"), "strike": ((255, 60, 60), "
               "landing": ((80, 170, 255), "tri", "landing"), "partisan": ((90, 230, 110), "diamond", "partisans"),
               "expedition": ((255, 255, 255), "plus", "expedition"),
               "revolution": ((230, 90, 255), "star", "revolution"),
-              "tribute": ((255, 215, 0), "square", "tribute"), "conquest": ((255, 90, 90), "circx", "conquest"),
+              "tribute": ((255, 215, 0), "arrow", "tribute (to overlord)"),
+              "puppet": ((190, 130, 255), "arrow", "puppet (to overlord)"),
+              "conquest": ((255, 90, 90), "circx", "conquest"),
               "village": ((200, 140, 80), "chevron", "village raid"), "refugees": ((120, 220, 255), "dot", "refugees"),
               "piracy": ((40, 220, 200), "zigzag", "pirates"), "smuggling": ((240, 110, 200), "bowtie", "smuggling"),
               "paramilitary": ((200, 60, 40), "ring2", "paramilitary"),
               "mercenary": ((220, 200, 120), "tri_down", "mercenaries"),
-              "crackdown": ((150, 190, 255), "square_x", "crackdown")}
+              "crackdown": ((150, 190, 255), "square_x", "crackdown"),
+              "epidemic": ((200, 230, 40), "trefoil", "epidemic"),
+              "cult": ((255, 120, 60), "eye", "cult"),
+              "creed": ((255, 210, 140), "sun", "creed takes power")}
 CAPITAL_STYLE = ((255, 255, 255), "capital", "capital")
 CRIME_STYLE = ((230, 40, 40), "base", "crime ring")
+SHIP_STYLE = ((40, 220, 200), "ship", "pirate fleet")
+SUPPLY_STYLE = ((235, 235, 235), "sship", "supply ship")
+CULT_STYLE = ((255, 120, 60), "eye", "cult")
+TRADE_STYLE = ((110, 200, 130), "line", "trade route")
 
 
 def draw_icon(shape, col, x, y, s):
     if shape == "x":
         pygame.draw.line(screen, col, (x - s, y - s), (x + s, y + s), 2)
         pygame.draw.line(screen, col, (x - s, y + s), (x + s, y - s), 2)
+    elif shape == "ship":                                # a hull and a black sail
+        pygame.draw.polygon(screen, col, [(x - s, y + s // 3), (x + s, y + s // 3), (x + s // 2, y + s),
+                                          (x - s // 2, y + s)], 0)
+        pygame.draw.polygon(screen, (10, 10, 10), [(x, y - s), (x, y + s // 3 - 1), (x + s * 3 // 4, y + s // 3 - 1)], 0)
+        pygame.draw.line(screen, col, (x, y - s), (x, y + s // 3), 1)
+    elif shape == "sship":                               # a supply ship: hull and a white sail
+        pygame.draw.polygon(screen, (120, 80, 40), [(x - s, y + s // 3), (x + s, y + s // 3), (x + s // 2, y + s),
+                                                    (x - s // 2, y + s)], 0)
+        pygame.draw.polygon(screen, col, [(x, y - s), (x, y + s // 3 - 1), (x + s * 3 // 4, y + s // 3 - 1)], 0)
+        pygame.draw.line(screen, col, (x, y - s), (x, y + s // 3), 1)
+    elif shape == "trefoil":                             # sickness: three dots round a centre
+        for k in range(3):
+            a = -np.pi / 2 + k * 2 * np.pi / 3
+            pygame.draw.circle(screen, col, (int(x + 0.55 * s * np.cos(a)), int(y + 0.55 * s * np.sin(a))),
+                               max(2, s // 2), 1)
+        pygame.draw.circle(screen, col, (x, y), 1, 0)
+    elif shape == "eye":                                 # a cult
+        pygame.draw.ellipse(screen, col, (x - s, y - s // 2, 2 * s, s), 2)
+        pygame.draw.circle(screen, col, (x, y), max(1, s // 3), 0)
+    elif shape == "sun":                                 # a creed comes to power
+        pygame.draw.circle(screen, col, (x, y), max(2, s // 2), 0)
+        for k in range(8):
+            a = k * np.pi / 4
+            pygame.draw.line(screen, col, (x + 0.65 * s * np.cos(a), y + 0.65 * s * np.sin(a)),
+                             (x + s * np.cos(a), y + s * np.sin(a)), 1)
+    elif shape == "line":                                # (the key: a trade route)
+        for k in range(-s, s, 4):
+            pygame.draw.line(screen, col, (x + k, y), (x + k + 2, y), 1)
+    elif shape == "arrow":                               # (the key: a line and an arrowhead)
+        pygame.draw.line(screen, col, (x - s, y), (x + s, y), 2)
+        pygame.draw.lines(screen, col, False, [(x + s - 4, y - 4), (x + s, y), (x + s - 4, y + 4)], 2)
     elif shape == "plus":
         pygame.draw.line(screen, col, (x - s, y), (x + s, y), 2)
         pygame.draw.line(screen, col, (x, y - s), (x, y + s), 2)
@@ -319,36 +389,95 @@ def draw_icon(shape, col, x, y, s):
         pygame.draw.circle(screen, col, (x, y), s, 2)
 
 
+def draw_vassal_line(a, b, col, solid=False):
+    """From a vassal's capital `a` to its overlord's `b`: dashed (tribute) or solid (puppet), with arrowheads pointing
+    to the overlord along the way and a ring round the overlord's capital."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = float(np.hypot(dx, dy))
+    if length < 4:
+        return
+    ux, uy = dx / length, dy / length
+    if solid:
+        pygame.draw.line(screen, col, a, b, 2)
+    else:
+        n = max(2, int(length // 8))
+        for k in range(0, n, 2):
+            pygame.draw.line(screen, col, (a[0] + dx * k / n, a[1] + dy * k / n),
+                             (a[0] + dx * (k + 1) / n, a[1] + dy * (k + 1) / n), 2)
+    steps = max(1, int(length // 45))
+    for k in range(1, steps + 1):                        # (arrowheads: >  >  >  toward the overlord)
+        t = k / (steps + 1)
+        x, y = a[0] + dx * t, a[1] + dy * t
+        s = 6
+        pygame.draw.lines(screen, col, False, [(x - ux * s - uy * s, y - uy * s + ux * s), (x, y),
+                                              (x - ux * s + uy * s, y - uy * s - ux * s)], 2)
+    pygame.draw.circle(screen, col, (int(b[0]), int(b[1])), 7, 2)
+
+
 def to_screen(r, c, half_w, half_h):
     if world.wrap:                                       # (the copy of the tile nearest the view)
         c = c + cols * round((cx - c) / cols)
     return int((c + 0.5 - (cx - half_w)) * zoom), int((r + 0.5 - (cy - half_h)) * zoom)
 
 
+def draw_trade(live, half_w, half_h, shown):
+    """Trade routes: thin dotted lines between the partners' capitals."""
+    import trade
+    by_id = {c.id: c for c in live}
+    col = TRADE_STYLE[0]
+    for k in trade.routes(world):
+        a, b = (by_id.get(i) for i in k)
+        if a is None or b is None:
+            continue
+        p, q = to_screen(*a.capital, half_w, half_h), to_screen(*b.capital, half_w, half_h)
+        if world.wrap and abs(a.capital[1] - b.capital[1]) > cols / 2:
+            continue                                     # (round the back of the world: not drawn)
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        n = max(2, int(np.hypot(dx, dy) // 5))
+        for i in range(0, n, 2):
+            pygame.draw.line(screen, col, (p[0] + dx * i / n, p[1] + dy * i / n),
+                             (p[0] + dx * (i + 1) / n, p[1] + dy * (i + 1) / n), 1)
+        shown.add("trade")
+
+
 def draw_marks(half_w, half_h):
     import globalaffairs
     import crime
+    import trade
     size = max(4, min(10, int(zoom * 2)))
     shown = set()
     live = [c for c in world.civs if c.id and not c.collapsed and c.capital is not None and c.m and c.m.get("n")]
-    for c in live:                                       # tribute: a dashed gold line from tributary to overlord
+    if show_trade:
+        draw_trade(live, half_w, half_h, shown)
+    for c in live:                                       # tribute / puppets: a line with arrows to the overlord
         lord = getattr(c, "overlord", None)
         if lord is None or lord >= len(world.civs) or world.civs[lord].capital is None:
             continue
-        a = to_screen(*c.capital, half_w, half_h)
-        b = to_screen(*world.civs[lord].capital, half_w, half_h)
-        n = max(2, int(np.hypot(b[0] - a[0], b[1] - a[1]) // 8))
-        for k in range(0, n, 2):
-            p = (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
-            q = (a[0] + (b[0] - a[0]) * (k + 1) / n, a[1] + (b[1] - a[1]) * (k + 1) / n)
-            pygame.draw.line(screen, MARK_STYLE["tribute"][0], p, q, 2)
-        shown.add("tribute")
+        kind = "puppet" if getattr(c, "vassal_kind", None) == "puppet" else "tribute"
+        draw_vassal_line(to_screen(*c.capital, half_w, half_h), to_screen(*world.civs[lord].capital, half_w, half_h),
+                         MARK_STYLE[kind][0], solid=kind == "puppet")
+        shown.add(kind)
     cap = max(2, min(6, int(zoom * 1.2)))
     for c in live:                                       # seats of government
         x, y = to_screen(*c.capital, half_w, half_h)
         if -cap <= x < VIEW_W + cap and -cap <= y < VIEW_H + cap:
             draw_icon("capital", render.civ_color(c.id), x, y, cap)
             shown.add("capital")
+    for r, c in crime.fleets(world):                     # pirate fleets at sea
+        x, y = to_screen(r, c, half_w, half_h)
+        if -size <= x < VIEW_W + size and -size <= y < VIEW_H + size:
+            draw_icon("ship", SHIP_STYLE[0], x, y, size)
+            shown.add("ship")
+    for r, c in trade.ships(world):                      # supply ships at anchor off a colony
+        x, y = to_screen(r, c, half_w, half_h)
+        if -size <= x < VIEW_W + size and -size <= y < VIEW_H + size:
+            draw_icon("sship", SUPPLY_STYLE[0], x, y, size)
+            shown.add("sship")
+    for g in ideology.active(world):                     # cults
+        x, y = to_screen(g["r"], g["c"], half_w, half_h)
+        if -size <= x < VIEW_W + size and -size <= y < VIEW_H + size:
+            draw_icon("eye", CULT_STYLE[0], x, y, size)
+            shown.add("cultbase")
     for g in crime.active(world):                        # organized crime: its bases
         x, y = to_screen(g["r"], g["c"], half_w, half_h)
         if -size <= x < VIEW_W + size and -size <= y < VIEW_H + size:
@@ -364,7 +493,10 @@ def draw_marks(half_w, half_h):
             shown.add(kind)
     # the key: every kind of mark on the map now, drawn as it is on the map
     items = [MARK_STYLE[k] for k in MARK_STYLE if k in shown]
-    items += [CRIME_STYLE] * ("base" in shown) + [CAPITAL_STYLE] * ("capital" in shown)
+    items += ([SHIP_STYLE] * ("ship" in shown) + [SUPPLY_STYLE] * ("sship" in shown)
+              + [CRIME_STYLE] * ("base" in shown)
+              + [CULT_STYLE] * ("cultbase" in shown and "cult" not in shown)
+              + [TRADE_STYLE] * ("trade" in shown) + [CAPITAL_STYLE] * ("capital" in shown))
     rows_, row, width = [], [], 0
     for col, shape, label in items:
         img = small.render(label, True, (190, 190, 205))
@@ -465,6 +597,12 @@ while not done:
                 mode = 3
             elif event.key == pygame.K_5:
                 mode = 5
+            elif event.key == pygame.K_6:
+                mode = 6
+            elif event.key == pygame.K_7:
+                mode = 7
+            elif event.key == pygame.K_g:
+                show_trade = not show_trade
             elif event.key in (pygame.K_F11, pygame.K_f):
                 toggle_fullscreen()
             elif event.key == pygame.K_ESCAPE and fullscreen:

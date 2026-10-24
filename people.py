@@ -81,7 +81,8 @@ EXODUS_DANGER = 0.45       # ... (danger at least this, or famine) ...
 EXODUS_SAFER = 0.2         # ... flee into a neighbour at least this much safer (and fed), not at war with it:
 EXODUS_REACH = 8           # those within this many tiles of the border,
 EXODUS_SHARE = 0.10        # this share of them per round (x how bad it is),
-EXODUS_INTO = 3            # onto its lived-on land within this many tiles of the border.
+EXODUS_INTO = 3            # onto its lived-on land within this many tiles of the border (no more than the land
+EXODUS_ROOM = 1.3          #  holds: this x what each place is rebuilt to - restart.home).
 EXODUS_CLOSED = 0.3        # A shut border lets this share through ...
 EXODUS_PRESS = 1           # ... and the crowds at the crossing points knock its defenses down by this (either way)
 EXODUS_UNREST = 0.4        # unrest added where they arrive (x arrivals / residents)
@@ -328,7 +329,9 @@ def exodus(world):
             if through <= 0:
                 continue
             go = np.floor(go * (through / n)).astype(np.int64)
-            room = np.maximum(255 - Hw[ar, ac].astype(np.int64), 0)
+            import restart
+            cap = np.minimum(255, EXODUS_ROOM * restart.home(world)[win][ar, ac] + 15).astype(np.int64)
+            room = np.maximum(cap - Hw[ar, ac].astype(np.int64), 0)
             if room.sum() <= 0:
                 continue
             through = min(int(go.sum()), int(room.sum()))
@@ -361,6 +364,53 @@ def exodus(world):
     return total
 
 
+DECONGEST_EVERY = 3        # crowds disperse: every this many days, where no zombie is within DECONGEST_CALM tiles,
+DECONGEST_CALM = 4         # a tile holding more than DECONGEST_OVER x what it is rebuilt to (+ DECONGEST_SLACK) -
+DECONGEST_OVER = 1.3       # refugees stuck against a river, on a mountain, at a border - sends DECONGEST_SHARE of the
+DECONGEST_SLACK = 15       # excess to the neighbouring land of its own government (or nobody's, for nobody's) that
+DECONGEST_SHARE = 0.3      # has room (up to DECONGEST_FILL x what it is rebuilt to, + DECONGEST_FILL_SLACK): the
+DECONGEST_FILL = 1.1       # camps empty into the countryside once the danger has passed
+DECONGEST_FILL_SLACK = 8
+
+
+def decongest(world):
+    """Overcrowded tiles in calm country send people to neighbours with room (DECONGEST_*).  Returns how many moved."""
+    import restart
+    from terrain import habitable
+    H, O = world.H, world.O
+    hm = restart.home(world)
+    calm = (world.zombie_near(DECONGEST_CALM) == 0) & world.land
+    cap = DECONGEST_OVER * hm + DECONGEST_SLACK
+    over = calm & (H > cap)
+    if not over.any():
+        return 0
+    excess = np.where(over, np.ceil((H - cap) * DECONGEST_SHARE), 0).astype(np.int64)
+    room = np.where(calm & habitable(world.T) & (H >= 0),
+                    np.maximum(DECONGEST_FILL * hm + DECONGEST_FILL_SLACK - H, 0), 0).astype(np.int64)
+    rows, cols = H.shape
+    total = np.zeros(H.shape, dtype=np.int64)
+    for dr, dc in DIRECTIONS:                        # (room next door, of the same government)
+        sr, tr = _slices(rows, dr)
+        sc, tc = _slices(cols, dc)
+        total[sr, sc] += np.where(O[tr, tc] == O[sr, sc], room[tr, tc], 0)
+    excess = np.minimum(excess, total)
+    left = excess.copy()
+    moved = 0
+    for dr, dc in DIRECTIONS:
+        sr, tr = _slices(rows, dr)
+        sc, tc = _slices(cols, dc)
+        share = np.where(O[tr, tc] == O[sr, sc], room[tr, tc], 0)
+        amt = np.where(total[sr, sc] > 0, -(-excess[sr, sc] * share // np.maximum(total[sr, sc], 1)), 0)   # (rounded up)
+        amt = np.minimum(np.minimum(amt, room[tr, tc]), left[sr, sc])
+        left[sr, sc] -= amt
+        amt = amt.astype(H.dtype)
+        H[sr, sc] -= amt
+        H[tr, tc] += amt
+        room[tr, tc] -= amt
+        moved += int(amt.sum())
+    return moved
+
+
 def step(world):
     H, D, T, O = world.H, world.D, world.T, world.O
     near = world.zombie_near(NEAR_RADIUS)
@@ -386,6 +436,8 @@ def step(world):
             world.last_strays = stragglers(world)
     else:
         world.last_panic = world.last_evac = world.last_refugees = 0
+    if world.ticks % DECONGEST_EVERY == 0 and getattr(world, "H0", None) is not None:
+        world.last_dispersed = decongest(world)       # (crowds disperse - with or without zombies about)
 
     # --- unrest and riots (worked out on land only: nobody riots at sea) ----------------------
     li = world.statics.land_idx

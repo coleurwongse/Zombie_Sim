@@ -120,6 +120,8 @@ def step(world):
                 continue
             missions.append(dict(donor=d.id, to=r.id, until=world.ticks + MISSION_TICKS))
             world.un["missions"] += 1
+            import diplomacy
+            diplomacy.on_help(world, d.id, r.id)
             world.note(f"UN peacekeepers from {d.name} arrive in {r.name}" if un
                        else f"{d.name} sends troops to help {r.name}")
             break

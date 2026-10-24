@@ -70,7 +70,7 @@ def _able(c, army):
 
 def _raid(world, w, att, tgt):
     import motives
-    if not _able(att, RAID_ARMY) or world.pyrng.random() >= RAID_CHANCE * min(1.0, motives.militarism(att)
+    if not _able(att, RAID_ARMY) or world.pyrng.random() >= RAID_CHANCE * motives.settled(world) * min(1.0, motives.militarism(att)
                                                                                + motives.need(att)):
         return
     import war

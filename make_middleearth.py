@@ -278,6 +278,7 @@ PLACES = [
 PORTS = [("Mithlond", 6), ("Harlond", 3), ("Dol Amroth", 5), ("Pelargir", 6), ("Umbar", 7), ("Edhellond", 2),
          ("Linhir", 3), ("Lond Daer", 1)]
 SETTLE_SCALE = 2.0            # (settlers' colonies keep further apart on this small map: settlers.py)
+CLIMATE = "north"             # (snowy winters in the north - Forodwaith, Angmar, the Misty Mountains: seasons.py)
 WARS = [("Mordor", "Gondor"), ("Isengard", "Rohan")]
 RIVALS = [("Gondor", "Harad"), ("Gondor", "Umbar"), ("Rohan", "Dunland"), ("Dale", "Rhun"), ("Erebor", "Rhun"),
           ("Woodland Realm", "Mordor"), ("Lothlorien", "Moria"), ("Lothlorien", "Mordor"),

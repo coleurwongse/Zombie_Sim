@@ -408,8 +408,14 @@ def main():
     w = DW(H, Z, D, T, O, A); civ = w.civs[1]; w.tick()
     civ.materials = 400.0; civ.military = 0.9; civ.tile_hist.extend([1500] * 8)
     z0, own0 = int(w.Z.sum()), int((w.O == 1).sum())
-    for _ in range(220):
-        civ.morale = 10; w.D[:, :24] = 7; w.tick(); civ.materials = min(400.0, civ.materials + 1.5)
+    import fracture                                       # (this is about the offensive, not about the realm splitting)
+    keep = fracture.OVEREXTEND_CHANCE
+    fracture.OVEREXTEND_CHANCE = 0.0
+    try:
+        for _ in range(220):
+            civ.morale = 10; w.D[:, :24] = 7; w.tick(); civ.materials = min(400.0, civ.materials + 1.5)
+    finally:
+        fracture.OVEREXTEND_CHANCE = keep
     ev = " ".join(t for _, t in w.events)
     assert "plants a fortified base" in ev and civ.advances >= 1 and int(w.Z.sum()) < 0.8 * z0 and int((w.O == 1).sum()) > own0 + 60, \
         (ev, civ.advances, z0, int(w.Z.sum()), own0, int((w.O == 1).sum()))
@@ -1370,7 +1376,12 @@ def main():
     a.military, a.materials, b_.materials = 0.9, 50.0, 50.0
     a.traits["aggression"] = 100.0
     h0, m0 = int(w.H[:, 20:].sum()), a.materials
-    warfare._raid(w, wr, a, b_)
+    keep = warfare.RAID_CHANCE
+    warfare.RAID_CHANCE = 10.0                               # (the raid itself, not the dice)
+    try:
+        warfare._raid(w, wr, a, b_)
+    finally:
+        warfare.RAID_CHANCE = keep
     assert int(w.H[:, 20:].sum()) < h0 and a.materials > m0
     w.O[:, 26:30] = 1                                        # (1 has taken the woods)
     wr["taken"] = {1: list(np.flatnonzero((w.O == 1).ravel() & (w.T == 2).ravel()))}
@@ -1541,6 +1552,201 @@ def main():
     big_reach = int(w.may_claim(np.full((100, 100), 1)).sum())
     assert small_reach < big_reach, (small_reach, big_reach)
     print("101 a small new state may claim %d tiles, a big one %d" % (small_reach, big_reach))
+    # 102. Tribute: a strong junta makes its weak neighbour pay - not the other way round; a puppet follows its
+    #      overlord into war and starts none of its own.
+    H, Z, D, T, O, A = blank(60, humans=100); O[:, 40:] = 2; H[:, 40:] = 30
+    w = sim.World(H, Z, D, T, O, A, seed=5, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick()
+    for c in w.civs[1:]: c.next_decision = 10 ** 9
+    big, small = w.civs[1], w.civs[2]
+    big.gov, big.military, big.strength, big.morale = "junta", 1.0, 0.9, 10
+    small.gov, small.military, small.strength = "democracy", 0.1, 0.2
+    keep = globalaffairs.TRIBUTE_CHANCE
+    globalaffairs.TRIBUTE_CHANCE = 10.0
+    try:
+        for k in range(10):
+            w.ticks = (k + 1) * globalaffairs.TRIBUTE_EVERY
+            globalaffairs._tribute(w, [big, small])
+            if getattr(small, "overlord", None) is not None or war.at_war(w, 1):
+                break
+    finally:
+        globalaffairs.TRIBUTE_CHANCE = keep
+    assert getattr(big, "overlord", None) is None, "the weak one demanded tribute"
+    assert getattr(small, "overlord", None) == 1 or war.key(1, 2) in w.wars, (small.__dict__.get("overlord"), w.wars)
+    for k in list(w.wars):
+        del w.wars[k]
+    globalaffairs.make_tributary(w, big, small, "wins the war", puppet=True)
+    third = w.add_civ(); third.capital = (5, 5)
+    w.truces = {}
+    war.declare(w, 1, third.id, "test")
+    assert war.key(small.id, third.id) in w.wars, w.wars
+    print("102 the junta made its weak neighbour pay tribute; its puppet followed it into war")
+    # 103. Pirate havens: a coastal town in a country with hardly an army to patrol its coast.
+    H, Z, D, T, O, A = blank(60, humans=120)
+    T[:, 30:] = 0; H[:, 30:] = 0; O[:, 30:] = 0
+    w = sim.World(H, Z, D, T, O, A, seed=12, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.cities = [("Smugglers' Cove", 30, 28, 1.0)]
+    w.tick(); w.civs[1].military = 0.1
+    keep = crime.PIRATE_HAVEN_CHANCE
+    crime.PIRATE_HAVEN_CHANCE = 1.0
+    try:
+        w.ticks = crime.PIRATE_HAVEN_START
+        crime.step(w)
+    finally:
+        crime.PIRATE_HAVEN_CHANCE = keep
+    pir = [g for g in crime.active(w) if g["kind"] == "pirates"]
+    assert pir, crime.active(w)
+    print("103 the %s made the coast their haven (the country hardly patrols it)" % pir[0]["name"])
+    # 104. Seasons: in the northern winter the dead freeze - they stay put, and the townsfolk smash a good part of
+    #      them, never all; in summer they move again.
+    import datetime
+    import seasons
+    import zombies
+    def north(month):
+        H, Z, D, T, O, A = blank(60, humans=0, owner=0)
+        H[:, :] = 0
+        meta = {"wrap": False, "res": 0.5, "bounds": [0.0, 30.0, 40.0, 70.0], "climate": "lat",
+                "start_date": f"2030-{month:02d}-15"}
+        w = sim.World(H, Z, D, T, O, A, seed=3, stochastic=True, meta=meta)
+        w.H[8:12, 20:26] = 120; w.O[8:12, 20:26] = 0
+        w.Z[10, 30] = 200
+        return w
+    w = north(1)
+    f = seasons.frozen(w)
+    assert f is not None and f[10, 30] > 0.9 and seasons.snow(w)[55, 30] < seasons.snow(w)[5, 30], f[10, 30]
+    moved = zombies.transport(w, np.array([10]), np.array([30]), np.array([10]), np.array([31]), np.array([100]))
+    assert moved <= 5, moved
+    w.Z[10, 30] = 0; w.Z[10, 27] = 200
+    for k in range(60):
+        w.ticks = k
+        seasons.step(w)
+    left = int(w.Z[10, 27])
+    assert 20 < left < 200, left
+    w2 = north(7)
+    assert seasons.frozen(w2) is None or seasons.frozen(w2)[10, 30] < 0.05
+    print("104 January in the north: the dead frozen (%d of 200 moved), 2 months of the townsfolk: %d of 200 left; "
+          "July: none frozen" % (moved, left))
+    # 105. Harvests follow the season - nothing under the snow - and come to a year's eating over the year.
+    w = north(1)
+    yr = np.zeros(w.H.shape)
+    eat = np.zeros(w.H.shape)
+    for d in range(365):
+        w.ticks = d
+        yr += seasons.harvest(w)
+        eat += 1 + seasons.WINTER_EAT * seasons.snow(w)
+    w.ticks = 0
+    jan = seasons.harvest(w)
+    ratio = yr[5, 30] / eat[5, 30]
+    assert jan[5, 30] < 0.05 and abs(ratio - 1) < 0.05 and abs(yr[55, 30] / eat[55, 30] - 1) < 0.05, (jan[5, 30], ratio)
+    assert seasons.store_days(0.6) > E.FOOD_CAP_TICKS
+    print("105 harvests: %.2f in a northern January, a year's crops / a year's eating = %.2f" % (jan[5, 30], ratio))
+    # 106. Disease: a fever in a crowded town kills many more where medicine is gone; it burns out.
+    import disease
+    import tech
+    def fever(level):
+        H, Z, D, T, O, A = blank(40, humans=200)
+        w = sim.World(H, Z, D, T, O, A, seed=7, stochastic=True, meta={"wrap": False, "res": 0.5})
+        w.tick()
+        tech.level(w)[:] = level
+        w.civs[1].famine = False
+        h0 = int(w.H.sum())
+        disease.outbreak(w, 20, 20, virulence=1.0, name="typhus")
+        for k in range(300):
+            w.ticks = 1 + k
+            disease.step(w)
+        return h0 - int(w.H.sum()), float(w.sick.max()), w
+    dead_med, left_med, _ = fever(1.0)
+    dead_none, left_none, w = fever(0.0)
+    assert dead_none > 2 * max(dead_med, 1) and left_none < 0.01, (dead_med, dead_none, left_none)
+    assert any("typhus" in e for _, e in w.war_log)
+    print("106 typhus in a crowded town: %d dead with medicine, %d without - then it burned out" % (dead_med, dead_none))
+    # 107. Technology is local: an emptied district loses it, a lived-in one keeps it, and it comes back from neighbours.
+    H, Z, D, T, O, A = blank(60, humans=100)
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick()
+    w.civs[1].capital = (30, 10); w._supply_t = -10 ** 6      # (the capital in the lived-in half)
+    w.H[:, 30:] = 0
+    for k in range(80):
+        w.ticks = (k + 1) * tech.TECH_EVERY
+        tech.step(w)
+    t = tech.level(w)
+    assert t[30, 10] > 0.95 and t[30, 50] <= tech.TECH_SALVAGE + 0.01, (t[30, 10], t[30, 50])
+    w.H[:, 30:] = 100
+    lo, lo_far = float(t[30, 40]), float(t[30, 55])
+    for k in range(40):
+        w.ticks = (100 + k) * tech.TECH_EVERY
+        tech.step(w)
+    assert t[30, 40] > lo + 0.2 and t[30, 40] - lo > t[30, 55] - lo_far, (lo, t[30, 40], lo_far, t[30, 55])
+    print("107 technology: %.2f where people stayed, %.2f in the emptied half; resettled, it came back to %.2f near "
+          "the old towns (%.2f far from them)" % (t[30, 10], lo, t[30, 40], t[30, 55]))
+    # 108. Supply lines: a far province gets less of its country's power - an overseas one is on its own (exempt).
+    import trade
+    H, Z, D, T, O, A = blank(100, humans=100)
+    T[:, 60:64] = 0; H[:, 60:64] = 0
+    w = sim.World(H, Z, D, T, O, A, seed=1, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick(); w.civs[1].capital = (50, 5)
+    sup = trade._supply(w)
+    assert sup[50, 8] == 1.0 and sup[50, 55] < 0.8 and sup[50, 90] == 1.0, (sup[50, 8], sup[50, 55], sup[50, 90])
+    print("108 supply: %.2f near the capital, %.2f in the far province, %.2f across the sea" %
+          (sup[50, 8], sup[50, 55], sup[50, 90]))
+    # 109. A colony across the sea gets ships from home: new colonists and supplies.
+    H, Z, D, T, O, A = blank(80, humans=100)
+    T[:, 35:45] = 0; H[:, 35:] = 0; O[:, 35:] = 0
+    w = sim.World(H, Z, D, T, O, A, seed=2, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick()
+    home = w.civs[1]; home.capital = (40, 10); home.ports = 1; home.materials = 200.0
+    col = w.add_civ(); col.capital = (40, 60); w.O[38:43, 58:63] = col.id; w.H[38:43, 58:63] = 40
+    col.food = 10.0; col.food_use = 1.0
+    w.tick()
+    trade.register(w, home, 40, 60, colony=col.id)
+    x = trade.outposts(w)[0]
+    h_before = int(w.H[40, 60])
+    for k in range(400):
+        w.ticks = 1000 + k
+        if w.ticks % trade.RESUPPLY_EVERY == 0:
+            trade._resupply(w)
+    assert x["ships"] >= 2 and int(w.H[40, 60]) > h_before, (x, h_before, int(w.H[40, 60]))
+    print("109 %d supply ships reached %s across the sea (its town: %d -> %d people)" %
+          (x["ships"], col.name, h_before, int(w.H[40, 60])))
+    # 110. Diplomacy remembers: the attacked hold a grudge for the land they lost; old friends sign pacts.
+    import diplomacy
+    H, Z, D, T, O, A = blank(60, humans=100); O[:, 30:] = 2
+    w = sim.World(H, Z, D, T, O, A, seed=5, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick()
+    w.truces = {}
+    war.declare(w, 1, 2, "test")
+    assert diplomacy.opinion(w, 2, 1) < -0.3 and diplomacy.hostility(w, 1, 2) > 1.5
+    w.wars[war.key(1, 2)]["captured"] = {1: 40}
+    war.end(w, war.key(1, 2), "armistice")
+    for k in range(100):
+        w.ticks = (k + 1) * diplomacy.EVERY
+        diplomacy.step(w)
+    assert diplomacy.grudge(w, 2, 1) > 0.25 and abs(diplomacy._rel(w).get((1, 2), (0, 0))[0]) < 0.05
+    third = w.add_civ()
+    diplomacy.change(w, 1, third.id, mood=0.8)
+    diplomacy.change(w, third.id, 1, mood=0.8)
+    assert diplomacy.hostility(w, 1, third.id) < 0.3
+    print("110 a thousand days on, the mood has passed but the grudge remains (%.2f); friends: hostility x%.2f"
+          % (diplomacy.grudge(w, 2, 1), diplomacy.hostility(w, 1, third.id)))
+    # 111. A cult in a desperate, unstable country grows and takes it over - a theocracy with a creed.
+    import ideology
+    import motives
+    H, Z, D, T, O, A = blank(40, humans=120)
+    w = sim.World(H, Z, D, T, O, A, seed=6, stochastic=True, meta={"wrap": False, "res": 0.5})
+    w.tick()
+    c = w.civs[1]; c.famine = True; c.instability = 0.8; c.military = 0.1; c.capital = (20, 20)
+    g = dict(name="the Church of the Last Days", creed="faith", r=20, c=20, host=1, strength=0.5, born=0,
+             alive=True, place="Testville")
+    ideology.cults(w).append(g)
+    for k in range(20):
+        if not g["alive"]:
+            break
+        c.instability = 0.8
+        ideology._grow(w, g)
+    assert c.gov == "theocracy" and ideology.creed(c) == "faith", (c.gov, ideology.creed(c), g)
+    other = w.add_civ()
+    assert ideology.affinity(c, other) < 0 and motives.militarism(c) > 0
+    print("111 %s took over: now %s (%s)" % (g["name"], c.name, ideology.LABEL[ideology.creed(c)]))
     print("all civ tests passed")
 
 

@@ -288,9 +288,24 @@ class _Grid:
         meta = getattr(world, "meta", None) or {}
         self.virulence = getattr(world, "virulence", 1.0) * float(meta.get("virulence_scale", 1.0))
         import recovery                                  # (the recovery era: people know how to fight them)
-        e = recovery.era(world)
-        self.bite_mult = np.float32(1.0 - recovery.WARY_BITE * e)
-        self.kill_mult = np.float32(1.0 + recovery.WARY_KILL * e)
+        w = recovery.wary(world)                         # (and districts that have kept watch since)
+        self.bite_mult = np.float32(1.0) if w is None else (1.0 - recovery.WARY_BITE * w).ravel()
+        self.kill_mult = np.float32(1.0) if w is None else (1.0 + recovery.WARY_KILL * w).ravel()
+        import seasons                                   # (the frozen dead: seasons.py)
+        f = seasons.frozen(world)
+        self.thaw = None
+        if f is not None:
+            self.bite_mult = self.bite_mult * (1.0 - seasons.FROZEN_BITE * f).ravel()
+            self.kill_mult = self.kill_mult * (1.0 + seasons.FROZEN_KILL * f).ravel()
+            self.thaw = (1.0 - f).ravel()
+        import tech                                      # (guns and ammunition - or spears: tech.py; supply lines,
+        import trade                                     #  trade.py; a creed's stance toward the dead, ideology.py)
+        import ideology
+        sup = trade.supply(world)
+        for m in (tech.mult(world, tech.TECH_FIGHT), None if sup is None else 1.0 - trade.SUPPLY_FIGHT * (1.0 - sup),
+                  ideology.kill_mult(world)):
+            if m is not None:
+                self.kill_mult = self.kill_mult * m.astype(np.float32).ravel()
         import hordes                                    # (organized hordes don't drift apart: hordes.COORD_DAMP)
         self.spread = np.float32(SPREAD * (1.0 - hordes.COORD_DAMP * hordes.coordination(world)))
         self.shut = None
@@ -318,12 +333,14 @@ def _bites(g, h, z, share):
     if i.size == 0:
         return
     hi, zi, dd = h[i], z[i], g.dd[i]
-    k = np.where(g.O[i] == 0, g.unorg[0], 1.0).astype(np.float32) * share * g.virulence * g.bite_mult
+    bm = g.bite_mult if np.ndim(g.bite_mult) == 0 else g.bite_mult[i]
+    km = g.kill_mult if np.ndim(g.kill_mult) == 0 else g.kill_mult[i]
+    k = np.where(g.O[i] == 0, g.unorg[0], 1.0).astype(np.float32) * share * g.virulence * bm
     j1, j2 = g.jitter(i.size), g.jitter(i.size)
     mnt, hil = g.mountain[i], g.highlands[i]
     hz = hi * zi / dd
     bite = np.floor(hz / np.where(mnt, 255.0, np.where(hil, 140.0, 80.0)) * k * j1)
-    kill = np.floor(zi / np.where(mnt, 20.0, np.where(hil, 90.0, 255.0)) * dd * dd * j2 * share * g.kill_mult)
+    kill = np.floor(zi / np.where(mnt, 20.0, np.where(hil, 90.0, 255.0)) * dd * dd * j2 * share * km)
     no = mnt & (hi <= 10)                                   # (the mountain rule needs more than 10 people)
     bite[no] = 0
     kill[no] = 0
@@ -392,6 +409,8 @@ def _move_zombies(g, h, z):
             ok = (way == k) & (t >= 0)
             ok &= ~g.blocked[np.where(t >= 0, t, 0)]
             out[k, deep_i] = np.where(ok, amt, out[k, deep_i])
+    if g.thaw is not None:                               # (frozen stiff: they don't move)
+        out *= g.thaw[src]
     tot = out.sum(axis=0)
     cap = nz * MAX_OUT
     scale = np.where(tot > cap, cap / np.maximum(tot, 1e-9), 1.0).astype(np.float32)
@@ -451,6 +470,7 @@ SCREENING = 0.85           # an alerted government screens passengers: flights o
 TRAVEL_BAN = 0.5           # once the world is alarmed, flights between countries stop (this share of them)
 LONG_HAUL = 0.1            # a long-haul flight (over LONG_HAUL_DEG) carries the infection this much as often as a short hop
 LONG_HAUL_DEG = 25.0
+TECH_FLY = 0.5             # (tech.TECH_FLY)
 GROUNDED = 0.5             # a government in a zombie emergency grounds this share of flights from its infected airports
 
 
@@ -463,8 +483,11 @@ def _airports(world, H, Z, closed):
     rnd = world.pyrng.random if world.stochastic else (lambda: 0.0)
     alert = np.array([getattr(c, "alert", 0.0) for c in world.civs])
     alarm = getattr(world, "alarm", 0.0)
+    t = getattr(world, "tech", None)
     for (i, j), links in list(world.airports.items()):
         if not links:
+            continue
+        if t is not None and t[i, j] < TECH_FLY:          # (no power, no fuel: nothing flies - tech.py)
             continue
         z, h = Z[i, j], H[i, j]
         if z > 10 or (h < 5 and z > 0):
